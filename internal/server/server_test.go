@@ -207,11 +207,33 @@ func TestRequestBodyLimit(t *testing.T) {
 	}
 }
 
+func TestProductionRequiresExplicitTaskStore(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Environment = "production"
+	_, err := New(cfg, Dependencies{Dispatcher: orchestrator.LoopbackDispatcher{}})
+	if err == nil || !strings.Contains(err.Error(), "task store is required") {
+		t.Fatalf("New() error = %v, want task store requirement", err)
+	}
+}
+
 func newTestServer(t *testing.T) *httptest.Server {
 	return newTestServerWithMaxBody(t, 1<<20)
 }
 
 func newTestServerWithMaxBody(t *testing.T, maxRequestBytes int64) *httptest.Server {
+	t.Helper()
+	cfg := newTestConfig(t)
+	cfg.MaxRequestBytes = maxRequestBytes
+	handler, err := New(cfg, Dependencies{Dispatcher: orchestrator.LoopbackDispatcher{}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newTestConfig(t *testing.T) config.Config {
 	t.Helper()
 	cardPath := filepath.Join(t.TempDir(), "agent-card.json")
 	card := `{
@@ -227,20 +249,14 @@ func newTestServerWithMaxBody(t *testing.T, maxRequestBytes int64) *httptest.Ser
 	if err := os.WriteFile(cardPath, []byte(card), 0o600); err != nil {
 		t.Fatalf("write agent card: %v", err)
 	}
-	handler, err := New(config.Config{
+	return config.Config{
 		Environment:     "test",
 		Port:            8080,
 		PublicBaseURL:   "https://a2a.example.com/",
 		AgentCardPath:   cardPath,
 		ShutdownTimeout: time.Second,
-		MaxRequestBytes: maxRequestBytes,
-	}, Dependencies{Dispatcher: orchestrator.LoopbackDispatcher{}})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		MaxRequestBytes: 1 << 20,
 	}
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	return server
 }
 
 func request(t *testing.T, client *http.Client, method, url string, body io.Reader) *http.Response {

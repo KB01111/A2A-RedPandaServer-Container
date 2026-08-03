@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -41,6 +42,9 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 		return nil, err
 	}
 	if dependencies.TaskStore == nil {
+		if cfg.Environment != "development" && cfg.Environment != "test" {
+			return nil, fmt.Errorf("task store is required in %s", cfg.Environment)
+		}
 		dependencies.TaskStore = taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
 			Authenticator: func(context.Context) (string, error) { return "anonymous", nil },
 		})

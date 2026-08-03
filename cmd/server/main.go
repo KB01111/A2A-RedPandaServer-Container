@@ -22,6 +22,10 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	if cfg.Environment != "development" && cfg.Environment != "test" {
+		logger.Error("production dependencies are not configured", "environment", cfg.Environment)
+		os.Exit(1)
+	}
 
 	handler, err := appserver.New(cfg, appserver.Dependencies{
 		Dispatcher: orchestrator.LoopbackDispatcher{},

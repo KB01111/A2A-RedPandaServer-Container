@@ -32,4 +32,6 @@ The server is a stateless protocol and orchestration process. Agent workers,
 PostgreSQL, Redpanda, S3-compatible storage, OpenResty, and the observability
 stack run separately. The development loopback dispatcher is deterministic and
 exists only for the protocol-core phase and local tests; the production wiring
-will replace it with the Redpanda dispatcher before the first release.
+will replace it with the Redpanda dispatcher before the first release. Until
+then, the executable refuses staging and production startup and the server
+constructor requires an explicit non-memory task store in those environments.

@@ -65,12 +65,16 @@ func Load() (Config, error) {
 	if err != nil || maxRequestBytes <= 0 {
 		return Config{}, fmt.Errorf("MAX_REQUEST_BODY_BYTES must be a positive integer")
 	}
+	agentCardPath := "config/agent-card.json"
+	if environment == "staging" || environment == "production" {
+		agentCardPath = "/app/config/agent-card.json"
+	}
 
 	return Config{
 		Environment:     environment,
 		Port:            port,
 		PublicBaseURL:   publicBaseURL,
-		AgentCardPath:   envOrDefault("AGENT_CARD_PATH", "config/agent-card.json"),
+		AgentCardPath:   envOrDefault("AGENT_CARD_PATH", agentCardPath),
 		ShutdownTimeout: shutdownTimeout,
 		KeepAlive:       keepAlive,
 		AgentInactivity: agentInactivity,
