@@ -1,0 +1,71 @@
+package config
+
+import (
+	"fmt"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	Environment     string
+	Port            int
+	PublicBaseURL   string
+	AgentCardPath   string
+	ShutdownTimeout time.Duration
+	KeepAlive       time.Duration
+	AgentInactivity time.Duration
+}
+
+func Load() (Config, error) {
+	environment := envOrDefault("APP_ENV", "development")
+	port, err := strconv.Atoi(envOrDefault("PORT", "8080"))
+	if err != nil || port < 1 || port > 65535 {
+		return Config{}, fmt.Errorf("PORT must be an integer between 1 and 65535")
+	}
+
+	publicBaseURL := envOrDefault("PUBLIC_BASE_URL", "http://localhost:"+strconv.Itoa(port))
+	parsedURL, err := url.ParseRequestURI(publicBaseURL)
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return Config{}, fmt.Errorf("PUBLIC_BASE_URL must be an absolute HTTP(S) URL")
+	}
+	if strings.EqualFold(environment, "production") && parsedURL.Scheme != "https" {
+		return Config{}, fmt.Errorf("PUBLIC_BASE_URL must use HTTPS in production")
+	}
+
+	shutdownTimeout, err := time.ParseDuration(envOrDefault("SHUTDOWN_TIMEOUT", "20s"))
+	if err != nil || shutdownTimeout <= 0 {
+		return Config{}, fmt.Errorf("SHUTDOWN_TIMEOUT must be a positive duration")
+	}
+	keepAlive, err := time.ParseDuration(envOrDefault("A2A_KEEP_ALIVE_INTERVAL", "15s"))
+	if err != nil || keepAlive <= 0 {
+		return Config{}, fmt.Errorf("A2A_KEEP_ALIVE_INTERVAL must be a positive duration")
+	}
+	agentInactivity, err := time.ParseDuration(envOrDefault("A2A_AGENT_INACTIVITY_TIMEOUT", "5m"))
+	if err != nil || agentInactivity <= 0 {
+		return Config{}, fmt.Errorf("A2A_AGENT_INACTIVITY_TIMEOUT must be a positive duration")
+	}
+
+	return Config{
+		Environment:     environment,
+		Port:            port,
+		PublicBaseURL:   publicBaseURL,
+		AgentCardPath:   envOrDefault("AGENT_CARD_PATH", "config/agent-card.json"),
+		ShutdownTimeout: shutdownTimeout,
+		KeepAlive:       keepAlive,
+		AgentInactivity: agentInactivity,
+	}, nil
+}
+
+func (c Config) Address() string {
+	return ":" + strconv.Itoa(c.Port)
+}
+
+func envOrDefault(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		return value
+	}
+	return fallback
+}
