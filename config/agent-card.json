@@ -1,0 +1,26 @@
+{
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:8080",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "description": "Routes A2A tasks to external agent workers through the Bridge orchestration plane.",
+  "name": "Bridge A2A Server",
+  "skills": [
+    {
+      "description": "Accepts and orchestrates tasks for external Bridge agent workers.",
+      "id": "bridge-task-orchestration",
+      "name": "Task orchestration",
+      "tags": ["orchestration", "agents", "streaming"]
+    }
+  ],
+  "version": "0.1.0"
+}
