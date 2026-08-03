@@ -21,7 +21,7 @@ func TestRequiredA2ARoutes(t *testing.T) {
 	testServer := newTestServer(t)
 
 	cardResponse := request(t, testServer.Client(), http.MethodGet, testServer.URL+"/.well-known/agent-card.json", nil)
-	defer cardResponse.Body.Close()
+	defer closeBody(t, cardResponse.Body)
 	if cardResponse.StatusCode != http.StatusOK {
 		t.Fatalf("agent card status = %d, want 200", cardResponse.StatusCode)
 	}
@@ -38,7 +38,7 @@ func TestRequiredA2ARoutes(t *testing.T) {
 		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
 	})
 	sendResponse := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/message:send", sendBody)
-	defer sendResponse.Body.Close()
+	defer closeBody(t, sendResponse.Body)
 	if sendResponse.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(sendResponse.Body)
 		t.Fatalf("message send status = %d, body = %s", sendResponse.StatusCode, data)
@@ -54,13 +54,13 @@ func TestRequiredA2ARoutes(t *testing.T) {
 	}
 
 	getResponse := request(t, testServer.Client(), http.MethodGet, testServer.URL+"/tasks/"+string(task.ID), nil)
-	defer getResponse.Body.Close()
+	defer closeBody(t, getResponse.Body)
 	if getResponse.StatusCode != http.StatusOK {
 		t.Fatalf("get task status = %d", getResponse.StatusCode)
 	}
 
 	listResponse := request(t, testServer.Client(), http.MethodGet, testServer.URL+"/tasks?pageSize=10", nil)
-	defer listResponse.Body.Close()
+	defer closeBody(t, listResponse.Body)
 	if listResponse.StatusCode != http.StatusOK {
 		t.Fatalf("list tasks status = %d", listResponse.StatusCode)
 	}
@@ -69,7 +69,7 @@ func TestRequiredA2ARoutes(t *testing.T) {
 		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("stream me")),
 	})
 	streamResponse := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/message:stream", streamBody)
-	defer streamResponse.Body.Close()
+	defer closeBody(t, streamResponse.Body)
 	if streamResponse.StatusCode != http.StatusOK {
 		t.Fatalf("message stream status = %d", streamResponse.StatusCode)
 	}
@@ -85,13 +85,13 @@ func TestRequiredA2ARoutes(t *testing.T) {
 	}
 
 	subscribeResponse := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/tasks/"+string(task.ID)+":subscribe", nil)
-	defer subscribeResponse.Body.Close()
+	defer closeBody(t, subscribeResponse.Body)
 	if subscribeResponse.StatusCode == http.StatusMethodNotAllowed || subscribeResponse.StatusCode == http.StatusNotFound {
 		t.Fatalf("subscribe route status = %d", subscribeResponse.StatusCode)
 	}
 
 	cancelResponse := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/tasks/"+string(task.ID)+":cancel", nil)
-	defer cancelResponse.Body.Close()
+	defer closeBody(t, cancelResponse.Body)
 	if cancelResponse.StatusCode == http.StatusMethodNotAllowed || cancelResponse.StatusCode == http.StatusNotFound {
 		t.Fatalf("cancel route status = %d", cancelResponse.StatusCode)
 	}
@@ -100,7 +100,7 @@ func TestRequiredA2ARoutes(t *testing.T) {
 func TestMalformedMessageReturnsProtocolError(t *testing.T) {
 	testServer := newTestServer(t)
 	response := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/message:send", strings.NewReader(`{"message":`))
-	defer response.Body.Close()
+	defer closeBody(t, response.Body)
 	if response.StatusCode < 400 || response.StatusCode >= 500 {
 		t.Fatalf("malformed message status = %d, want 4xx", response.StatusCode)
 	}
@@ -125,7 +125,7 @@ func TestProtocolVersionIsRequired(t *testing.T) {
 			if err != nil {
 				t.Fatalf("send request: %v", err)
 			}
-			defer response.Body.Close()
+			defer closeBody(t, response.Body)
 			if response.StatusCode != http.StatusBadRequest {
 				t.Fatalf("unsupported version status = %d, want 400", response.StatusCode)
 			}
@@ -217,5 +217,12 @@ func decodeJSON(t *testing.T, reader io.Reader, target any) {
 	t.Helper()
 	if err := json.NewDecoder(reader).Decode(target); err != nil {
 		t.Fatalf("decode JSON: %v", err)
+	}
+}
+
+func closeBody(t *testing.T, body io.Closer) {
+	t.Helper()
+	if err := body.Close(); err != nil {
+		t.Errorf("close response body: %v", err)
 	}
 }
