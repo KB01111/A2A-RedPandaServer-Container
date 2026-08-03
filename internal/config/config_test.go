@@ -26,8 +26,14 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		value string
 	}{
 		{name: "port", key: "PORT", value: "70000"},
+		{name: "environment", key: "APP_ENV", value: "prod"},
 		{name: "public URL", key: "PUBLIC_BASE_URL", value: "localhost"},
+		{name: "public URL credentials", key: "PUBLIC_BASE_URL", value: "https://user:secret@a2a.example.com"},
+		{name: "public URL path", key: "PUBLIC_BASE_URL", value: "https://a2a.example.com/base"},
+		{name: "public URL query", key: "PUBLIC_BASE_URL", value: "https://a2a.example.com?tenant=x"},
 		{name: "shutdown timeout", key: "SHUTDOWN_TIMEOUT", value: "0s"},
+		{name: "read timeout", key: "HTTP_READ_TIMEOUT", value: "0s"},
+		{name: "request body limit", key: "MAX_REQUEST_BODY_BYTES", value: "0"},
 	}
 
 	for _, test := range tests {
@@ -44,7 +50,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 }
 
 func TestLoadRequiresHTTPSInProduction(t *testing.T) {
-	t.Setenv("APP_ENV", "production")
+	t.Setenv("APP_ENV", " production ")
 	t.Setenv("PUBLIC_BASE_URL", "http://a2a.example.com")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want HTTPS validation error")

@@ -26,11 +26,17 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 	if cfg.AgentInactivity <= 0 {
 		cfg.AgentInactivity = 5 * time.Minute
 	}
+	if cfg.MaxRequestBytes <= 0 {
+		cfg.MaxRequestBytes = 1 << 20
+	}
 	card, err := loadAgentCard(cfg.AgentCardPath, cfg.PublicBaseURL)
 	if err != nil {
 		return nil, err
 	}
-	executor, err := orchestrator.NewExecutor(dependencies.Dispatcher)
+	if dependencies.Logger == nil {
+		dependencies.Logger = slog.Default()
+	}
+	executor, err := orchestrator.NewExecutor(dependencies.Dispatcher, dependencies.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -39,10 +45,6 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 			Authenticator: func(context.Context) (string, error) { return "anonymous", nil },
 		})
 	}
-	if dependencies.Logger == nil {
-		dependencies.Logger = slog.Default()
-	}
-
 	requestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithTaskStore(dependencies.TaskStore),
@@ -66,5 +68,5 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 			return a2a.ErrInternalError
 		}),
 	))
-	return normalizeServiceParameters(mux), nil
+	return limitRequestBody(cfg.MaxRequestBytes, normalizeServiceParameters(mux)), nil
 }

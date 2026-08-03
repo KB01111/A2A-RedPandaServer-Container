@@ -10,8 +10,8 @@
     "streaming": true,
     "pushNotifications": false
   },
-  "defaultInputModes": ["text/plain", "application/json"],
-  "defaultOutputModes": ["text/plain", "application/json"],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
   "description": "Routes A2A tasks to external agent workers through the Bridge orchestration plane.",
   "name": "Bridge A2A Server",
   "skills": [

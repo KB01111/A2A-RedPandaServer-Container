@@ -17,10 +17,17 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	KeepAlive       time.Duration
 	AgentInactivity time.Duration
+	HTTPReadTimeout time.Duration
+	MaxRequestBytes int64
 }
 
 func Load() (Config, error) {
-	environment := envOrDefault("APP_ENV", "development")
+	environment := strings.ToLower(strings.TrimSpace(envOrDefault("APP_ENV", "development")))
+	switch environment {
+	case "development", "test", "staging", "production":
+	default:
+		return Config{}, fmt.Errorf("APP_ENV must be development, test, staging, or production")
+	}
 	port, err := strconv.Atoi(envOrDefault("PORT", "8080"))
 	if err != nil || port < 1 || port > 65535 {
 		return Config{}, fmt.Errorf("PORT must be an integer between 1 and 65535")
@@ -31,8 +38,11 @@ func Load() (Config, error) {
 	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		return Config{}, fmt.Errorf("PUBLIC_BASE_URL must be an absolute HTTP(S) URL")
 	}
-	if strings.EqualFold(environment, "production") && parsedURL.Scheme != "https" {
-		return Config{}, fmt.Errorf("PUBLIC_BASE_URL must use HTTPS in production")
+	if parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" || (parsedURL.Path != "" && parsedURL.Path != "/") {
+		return Config{}, fmt.Errorf("PUBLIC_BASE_URL must not contain credentials, a path, query, or fragment")
+	}
+	if (environment == "staging" || environment == "production") && parsedURL.Scheme != "https" {
+		return Config{}, fmt.Errorf("PUBLIC_BASE_URL must use HTTPS in staging and production")
 	}
 
 	shutdownTimeout, err := time.ParseDuration(envOrDefault("SHUTDOWN_TIMEOUT", "20s"))
@@ -47,6 +57,14 @@ func Load() (Config, error) {
 	if err != nil || agentInactivity <= 0 {
 		return Config{}, fmt.Errorf("A2A_AGENT_INACTIVITY_TIMEOUT must be a positive duration")
 	}
+	httpReadTimeout, err := time.ParseDuration(envOrDefault("HTTP_READ_TIMEOUT", "30s"))
+	if err != nil || httpReadTimeout <= 0 {
+		return Config{}, fmt.Errorf("HTTP_READ_TIMEOUT must be a positive duration")
+	}
+	maxRequestBytes, err := strconv.ParseInt(envOrDefault("MAX_REQUEST_BODY_BYTES", "1048576"), 10, 64)
+	if err != nil || maxRequestBytes <= 0 {
+		return Config{}, fmt.Errorf("MAX_REQUEST_BODY_BYTES must be a positive integer")
+	}
 
 	return Config{
 		Environment:     environment,
@@ -56,6 +74,8 @@ func Load() (Config, error) {
 		ShutdownTimeout: shutdownTimeout,
 		KeepAlive:       keepAlive,
 		AgentInactivity: agentInactivity,
+		HTTPReadTimeout: httpReadTimeout,
+		MaxRequestBytes: maxRequestBytes,
 	}, nil
 }
 

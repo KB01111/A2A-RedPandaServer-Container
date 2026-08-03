@@ -140,23 +140,78 @@ func TestProtocolVersionIsRequired(t *testing.T) {
 	}
 }
 
+func TestProtocolVersionQueryParameter(t *testing.T) {
+	testServer := newTestServer(t)
+	body := marshalJSON(t, a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, testServer.URL+"/message:send?A2A-Version=1.0", body)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	response, err := testServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	defer closeBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("query version status = %d, body = %s", response.StatusCode, data)
+	}
+}
+
+func TestConflictingProtocolVersionsAreRejected(t *testing.T) {
+	testServer := newTestServer(t)
+	body := marshalJSON(t, a2a.SendMessageRequest{
+		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, testServer.URL+"/message:send?A2A-Version=0.3", body)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(a2a.SvcParamVersion, string(a2a.Version))
+	response, err := testServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	defer closeBody(t, response.Body)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("conflicting version status = %d, want 400", response.StatusCode)
+	}
+}
+
 func TestNormalizeExtensions(t *testing.T) {
 	var got []string
 	handler := normalizeServiceParameters(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		got = request.Header.Values(a2a.SvcParamExtensions)
 		response.WriteHeader(http.StatusNoContent)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?A2A-Extensions=https%3A%2F%2Ffour.example", nil)
 	req.Header.Add(a2a.SvcParamExtensions, "https://one.example, https://two.example")
 	req.Header.Add(a2a.SvcParamExtensions, "https://three.example")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
-	want := []string{"https://one.example", "https://two.example", "https://three.example"}
+	want := []string{"https://one.example", "https://two.example", "https://three.example", "https://four.example"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("extensions = %#v, want %#v", got, want)
 	}
 }
 
+func TestRequestBodyLimit(t *testing.T) {
+	testServer := newTestServerWithMaxBody(t, 128)
+	response := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/message:send", strings.NewReader(strings.Repeat("x", 129)))
+	defer closeBody(t, response.Body)
+	if response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body status = %d, want 413", response.StatusCode)
+	}
+}
+
 func newTestServer(t *testing.T) *httptest.Server {
+	return newTestServerWithMaxBody(t, 1<<20)
+}
+
+func newTestServerWithMaxBody(t *testing.T, maxRequestBytes int64) *httptest.Server {
 	t.Helper()
 	cardPath := filepath.Join(t.TempDir(), "agent-card.json")
 	card := `{
@@ -178,6 +233,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		PublicBaseURL:   "https://a2a.example.com/",
 		AgentCardPath:   cardPath,
 		ShutdownTimeout: time.Second,
+		MaxRequestBytes: maxRequestBytes,
 	}, Dependencies{Dispatcher: orchestrator.LoopbackDispatcher{}})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
