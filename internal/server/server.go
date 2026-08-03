@@ -2,13 +2,13 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/config"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/orchestrator"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 )
@@ -50,7 +50,8 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 		a2asrv.WithCallInterceptors(protocolVersionInterceptor{}),
 		a2asrv.WithAgentInactivityTimeout(cfg.AgentInactivity),
 		a2asrv.WithExecutionPanicHandler(func(recovered any) error {
-			return fmt.Errorf("agent execution panic: %v", recovered)
+			dependencies.Logger.Error("agent execution panic", "panic", recovered)
+			return a2a.ErrInternalError
 		}),
 		a2asrv.WithLogger(dependencies.Logger),
 	)
@@ -61,7 +62,8 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 		requestHandler,
 		a2asrv.WithTransportKeepAlive(cfg.KeepAlive),
 		a2asrv.WithTransportPanicHandler(func(recovered any) error {
-			return fmt.Errorf("transport panic: %v", recovered)
+			dependencies.Logger.Error("transport panic", "panic", recovered)
+			return a2a.ErrInternalError
 		}),
 	))
 	return normalizeServiceParameters(mux), nil

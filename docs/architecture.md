@@ -31,5 +31,5 @@ comma-separated `A2A-Extensions` values before handing requests to `a2asrv`.
 The server is a stateless protocol and orchestration process. Agent workers,
 PostgreSQL, Redpanda, S3-compatible storage, OpenResty, and the observability
 stack run separately. The development loopback dispatcher is deterministic and
-exists only for local protocol tests; production startup uses the Redpanda
-dispatcher.
+exists only for the protocol-core phase and local tests; the production wiring
+will replace it with the Redpanda dispatcher before the first release.
