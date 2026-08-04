@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/KB01111/A2A-RedPandaServer-Container/internal/artifact"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
@@ -33,7 +34,10 @@ type Output struct {
 	ArtifactID a2a.ArtifactID
 	Parts      []*a2a.Part
 	LastChunk  bool
+	Heartbeat  bool
 }
+
+var ErrExecutionCanceled = errors.New("remote execution canceled")
 
 type Dispatcher interface {
 	Dispatch(context.Context, DispatchRequest) iter.Seq2[Output, error]
@@ -41,11 +45,34 @@ type Dispatcher interface {
 }
 
 type Executor struct {
-	dispatcher Dispatcher
-	logger     *slog.Logger
+	dispatcher       Dispatcher
+	logger           *slog.Logger
+	artifactPipeline *ArtifactPipeline
+}
+
+type ArtifactRecorder interface {
+	SaveReadyObject(context.Context, artifact.ObjectRecord) error
+}
+
+// ArtifactPipeline externalizes large raw artifact parts and persists their
+// metadata before the URL-bearing event reaches the task store.
+type ArtifactPipeline struct {
+	Externalizer *artifact.Externalizer
+	Recorder     ArtifactRecorder
 }
 
 func NewExecutor(dispatcher Dispatcher, loggers ...*slog.Logger) (*Executor, error) {
+	return newExecutor(dispatcher, nil, loggers...)
+}
+
+func NewExecutorWithArtifacts(dispatcher Dispatcher, pipeline ArtifactPipeline, loggers ...*slog.Logger) (*Executor, error) {
+	if pipeline.Externalizer == nil || pipeline.Recorder == nil {
+		return nil, errors.New("artifact externalizer and recorder are required")
+	}
+	return newExecutor(dispatcher, &pipeline, loggers...)
+}
+
+func newExecutor(dispatcher Dispatcher, pipeline *ArtifactPipeline, loggers ...*slog.Logger) (*Executor, error) {
 	if dispatcher == nil {
 		return nil, errors.New("dispatcher is required")
 	}
@@ -53,7 +80,7 @@ func NewExecutor(dispatcher Dispatcher, loggers ...*slog.Logger) (*Executor, err
 	if len(loggers) > 0 && loggers[0] != nil {
 		logger = loggers[0]
 	}
-	return &Executor{dispatcher: dispatcher, logger: logger}, nil
+	return &Executor{dispatcher: dispatcher, logger: logger, artifactPipeline: pipeline}, nil
 }
 
 func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -67,6 +94,25 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 		}
 		if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) {
 			return
+		}
+		var artifactSession *artifact.Session
+		if e.artifactPipeline != nil {
+			owner, err := executorOwner(execCtx)
+			if err != nil {
+				e.logger.Error("artifact owner is unavailable", "task_id", execCtx.TaskID, "error", err)
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, agentErrorMessage()), nil)
+				return
+			}
+			var existing []*a2a.Artifact
+			if execCtx.StoredTask != nil {
+				existing = execCtx.StoredTask.Artifacts
+			}
+			artifactSession, err = e.artifactPipeline.Externalizer.NewSession(owner, execCtx.TaskID, existing)
+			if err != nil {
+				e.logger.Error("initialize artifact session", "task_id", execCtx.TaskID, "error", err)
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, agentErrorMessage()), nil)
+				return
+			}
 		}
 
 		dispatchRequest := DispatchRequest{
@@ -83,8 +129,20 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 		for output, err := range e.dispatcher.Dispatch(ctx, dispatchRequest) {
 			if err != nil {
 				e.logger.Error("dispatcher execution failed", "task_id", execCtx.TaskID, "error", err)
-				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, agentErrorMessage()), nil)
+				state := a2a.TaskStateFailed
+				message := agentErrorMessage()
+				if errors.Is(err, ErrExecutionCanceled) {
+					state = a2a.TaskStateCanceled
+					message = nil
+				}
+				yield(a2a.NewStatusUpdateEvent(execCtx, state, message), nil)
 				return
+			}
+			if output.Heartbeat {
+				if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) {
+					return
+				}
+				continue
 			}
 			if len(output.Parts) > 0 {
 				artifactKey := output.ArtifactID
@@ -101,6 +159,22 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 					event = a2a.NewArtifactUpdateEvent(execCtx, artifactID, output.Parts...)
 				}
 				event.LastChunk = output.LastChunk
+				if artifactSession != nil {
+					externalized, err := artifactSession.ExternalizeEvent(ctx, event)
+					for _, record := range externalized.Objects {
+						if persistErr := e.artifactPipeline.Recorder.SaveReadyObject(ctx, record); persistErr != nil {
+							e.logger.Error("persist artifact object metadata", "task_id", execCtx.TaskID, "object_id", record.ObjectID, "error", persistErr)
+							yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, agentErrorMessage()), nil)
+							return
+						}
+					}
+					if err != nil {
+						e.logger.Error("externalize artifact", "task_id", execCtx.TaskID, "error", err)
+						yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, agentErrorMessage()), nil)
+						return
+					}
+					event = externalized.Event
+				}
 				if !yield(event, nil) {
 					return
 				}
@@ -138,6 +212,19 @@ func executorTenant(execCtx *a2asrv.ExecutorContext) string {
 		}
 	}
 	return ""
+}
+
+func executorOwner(execCtx *a2asrv.ExecutorContext) (artifact.Owner, error) {
+	if execCtx == nil || execCtx.User == nil {
+		return artifact.Owner{}, errors.New("authenticated executor user is required")
+	}
+	issuer, issuerOK := execCtx.User.Attributes["issuer"].(string)
+	subject, subjectOK := execCtx.User.Attributes["subject"].(string)
+	tenant := executorTenant(execCtx)
+	if !issuerOK || !subjectOK || issuer == "" || tenant == "" || subject == "" {
+		return artifact.Owner{}, errors.New("authenticated issuer, tenant, and subject are required")
+	}
+	return artifact.Owner{Issuer: issuer, Tenant: tenant, Subject: subject}, nil
 }
 
 func serviceExtensions(params *a2asrv.ServiceParams) []string {

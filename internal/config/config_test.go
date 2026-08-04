@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLoadDefaults(t *testing.T) {
 	for _, key := range configEnvironmentKeys {
@@ -94,6 +97,40 @@ var configEnvironmentKeys = []string{
 	"DATABASE_MAX_CONNECTION_LIFETIME",
 	"DATABASE_MAX_CONNECTION_IDLE",
 	"DATABASE_HEALTH_CHECK_PERIOD",
+	"REDPANDA_BROKERS",
+	"REDPANDA_SECURITY_PROTOCOL",
+	"REDPANDA_SASL_MECHANISM",
+	"REDPANDA_USERNAME",
+	"REDPANDA_PASSWORD_FILE",
+	"REDPANDA_CA_FILE",
+	"REDPANDA_CLIENT_CERT_FILE",
+	"REDPANDA_CLIENT_KEY_FILE",
+	"REDPANDA_TOPIC_PREFIX",
+	"REDPANDA_CONSUMER_GROUP",
+	"REDPANDA_CLIENT_ID",
+	"REDPANDA_PRODUCE_TIMEOUT",
+	"REDPANDA_RESULT_IDLE_TIMEOUT",
+	"REDPANDA_MAX_MESSAGE_BYTES",
+	"REDPANDA_ALLOW_AUTO_TOPIC_CREATION",
+	"S3_ENDPOINT",
+	"S3_PUBLIC_ENDPOINT",
+	"S3_REGION",
+	"S3_BUCKET",
+	"S3_ACCESS_KEY_FILE",
+	"S3_SECRET_KEY_FILE",
+	"S3_USE_PATH_STYLE",
+	"S3_EXTERNALIZE_AT_BYTES",
+	"S3_MAX_OBJECT_BYTES",
+	"S3_PRESIGN_TTL",
+	"WEBHOOK_ENABLED",
+	"WEBHOOK_SIGNING_PRIVATE_KEY_FILE",
+	"WEBHOOK_CREDENTIAL_KEYS_FILE",
+	"WEBHOOK_WORKERS",
+	"WEBHOOK_BATCH_SIZE",
+	"WEBHOOK_LEASE_DURATION",
+	"WEBHOOK_DELIVERY_TIMEOUT",
+	"WEBHOOK_MAX_ATTEMPTS",
+	"WEBHOOK_MAX_RETRY_AGE",
 }
 
 func TestLoadOIDCConfiguration(t *testing.T) {
@@ -201,6 +238,16 @@ func TestLoadDatabaseConfiguration(t *testing.T) {
 	}
 	if cfg.Database.MaxConnections != 20 || cfg.Database.MinConnections != 2 || cfg.Database.PasswordFile != "/run/secrets/database_password" {
 		t.Fatalf("database config = %#v", cfg.Database)
+	}
+}
+
+func TestLoadRequiresDatabasePasswordFileOutsideDevelopment(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("APP_ENV", "staging")
+	t.Setenv("PUBLIC_BASE_URL", "https://a2a.example.test")
+	t.Setenv("DATABASE_URL", "postgresql://bridge@db.internal/bridge?sslmode=verify-full")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DATABASE_PASSWORD_FILE") {
+		t.Fatalf("Load() error = %v, want password file requirement", err)
 	}
 }
 

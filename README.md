@@ -27,7 +27,7 @@ for the SDK boundary and planned production adapters.
 `.env.example` documents variables loaded by the container runtime. When
 running the binary directly, export overrides in the shell environment.
 
-## OIDC and PostgreSQL development wiring
+## Durable development wiring
 
 Set `OIDC_ISSUER`, `OIDC_AUDIENCE`, and `DATABASE_URL` to exercise the durable,
 authenticated path. Credentials are read from mounted files such as
@@ -41,7 +41,27 @@ go run ./cmd/migrate
 go run ./cmd/server
 ```
 
-The local in-memory task store remains available only when no database is
-configured in development or tests. Staging and production require explicit
-authentication and durable storage. See [docs/architecture.md](docs/architecture.md)
-for the token and tenant-isolation contract.
+Add the Redpanda, S3, and webhook variables from `.env.example` to exercise the
+complete production data path. Redpanda commands use a PostgreSQL outbox;
+results are persisted before consumer offsets are committed. Large raw
+artifact parts move to the private S3 bucket and resolve through authenticated
+stable application URLs. Push notifications are transactionally enqueued and
+delivered by leased, signed webhook workers.
+
+The webhook signing file accepts one Ed25519 PKCS#8 `PRIVATE KEY` PEM block (or
+a base64-encoded 64-byte private key). The credential keyring is strict JSON:
+
+```json
+{
+  "currentKeyId": 1,
+  "keys": {
+    "1": "base64-encoded-32-byte-AES-key"
+  }
+}
+```
+
+The local in-memory task store and loopback dispatcher remain available only
+when the corresponding external services are omitted in development or tests.
+Staging and production require OIDC, PostgreSQL, Redpanda, S3, and webhook
+configuration. See [docs/architecture.md](docs/architecture.md) for the SDK,
+durability, encryption, and tenant-isolation contracts.

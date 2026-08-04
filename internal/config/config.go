@@ -23,6 +23,9 @@ type Config struct {
 	MaxRequestBytes int64
 	OIDC            OIDCConfig
 	Database        DatabaseConfig
+	Redpanda        RedpandaConfig
+	S3              S3Config
+	Webhook         WebhookConfig
 }
 
 type OIDCConfig struct {
@@ -100,7 +103,19 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	databaseConfig, err := loadDatabaseConfig()
+	databaseConfig, err := loadDatabaseConfig(environment)
+	if err != nil {
+		return Config{}, err
+	}
+	redpandaConfig, err := loadRedpandaConfig(environment)
+	if err != nil {
+		return Config{}, err
+	}
+	s3Config, err := loadS3Config(environment)
+	if err != nil {
+		return Config{}, err
+	}
+	webhookConfig, err := loadWebhookConfig(environment)
 	if err != nil {
 		return Config{}, err
 	}
@@ -117,6 +132,9 @@ func Load() (Config, error) {
 		MaxRequestBytes: maxRequestBytes,
 		OIDC:            oidcConfig,
 		Database:        databaseConfig,
+		Redpanda:        redpandaConfig,
+		S3:              s3Config,
+		Webhook:         webhookConfig,
 	}, nil
 }
 
@@ -217,7 +235,7 @@ func IsLoopbackHost(host string) bool {
 	return address != nil && address.IsLoopback()
 }
 
-func loadDatabaseConfig() (DatabaseConfig, error) {
+func loadDatabaseConfig(environment string) (DatabaseConfig, error) {
 	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	passwordFile := strings.TrimSpace(os.Getenv("DATABASE_PASSWORD_FILE"))
 	if databaseURL == "" {
@@ -243,6 +261,9 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 	}
 	if passwordFile != "" && !filepath.IsAbs(passwordFile) && !strings.HasPrefix(passwordFile, "/") {
 		return DatabaseConfig{}, fmt.Errorf("DATABASE_PASSWORD_FILE must be an absolute path")
+	}
+	if (environment == "staging" || environment == "production") && passwordFile == "" {
+		return DatabaseConfig{}, fmt.Errorf("DATABASE_PASSWORD_FILE is required in staging and production")
 	}
 	maxConnections, err := parseInt32("DATABASE_MAX_CONNECTIONS", 20, 1, 500)
 	if err != nil {
@@ -299,4 +320,31 @@ func parsePositiveDuration(key, fallback string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a positive duration", key)
 	}
 	return value, nil
+}
+
+func parsePositiveInt64(key string, fallback, maximum int64) (int64, error) {
+	value, err := strconv.ParseInt(envOrDefault(key, strconv.FormatInt(fallback, 10)), 10, 64)
+	if err != nil || value <= 0 || (maximum > 0 && value > maximum) {
+		return 0, fmt.Errorf("%s must be between 1 and %d", key, maximum)
+	}
+	return value, nil
+}
+
+func requireAbsolutePath(key, value string) error {
+	if value == "" {
+		return nil
+	}
+	if !filepath.IsAbs(value) && !strings.HasPrefix(value, "/") {
+		return fmt.Errorf("%s must be an absolute path", key)
+	}
+	return nil
+}
+
+func anyConfigured(keys ...string) (string, bool) {
+	for _, key := range keys {
+		if os.Getenv(key) != "" {
+			return key, true
+		}
+	}
+	return "", false
 }

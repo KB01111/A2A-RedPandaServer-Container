@@ -11,11 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/KB01111/A2A-RedPandaServer-Container/internal/auth"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/config"
-	"github.com/KB01111/A2A-RedPandaServer-Container/internal/orchestrator"
 	appserver "github.com/KB01111/A2A-RedPandaServer-Container/internal/server"
-	"github.com/KB01111/A2A-RedPandaServer-Container/internal/storage/postgres"
 )
 
 func main() {
@@ -31,56 +28,28 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
-	if cfg.Environment != "development" && cfg.Environment != "test" {
-		return fmt.Errorf("redpanda dispatcher is not configured for %s", cfg.Environment)
-	}
-
 	shutdownSignals, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	dependencies := appserver.Dependencies{
-		Dispatcher: orchestrator.LoopbackDispatcher{},
-		Logger:     logger,
+	runContext, cancel := context.WithCancel(shutdownSignals)
+	defer cancel()
+	runtime, err := buildApplicationRuntime(runContext, cfg, logger)
+	if err != nil {
+		return err
 	}
-	if cfg.OIDC.Enabled() {
-		verifier, err := auth.NewOIDCVerifier(shutdownSignals, cfg.OIDC)
-		if err != nil {
-			return fmt.Errorf("initialize OIDC verifier: %w", err)
-		}
-		dependencies.Authentication, err = auth.NewAuthenticator(verifier, cfg.OIDC.Issuer, cfg.OIDC.RequiredScopes)
-		if err != nil {
-			return fmt.Errorf("initialize authentication: %w", err)
-		}
-	}
-
-	if cfg.Database.URL != "" {
-		if dependencies.Authentication == nil {
-			return fmt.Errorf("DATABASE_URL requires OIDC authentication")
-		}
-		pool, err := postgres.OpenPool(shutdownSignals, postgres.PoolConfig{
-			DatabaseURL:       cfg.Database.URL,
-			PasswordFile:      cfg.Database.PasswordFile,
-			ApplicationName:   "bridge-a2a-server",
-			MaxConns:          cfg.Database.MaxConnections,
-			MinConns:          cfg.Database.MinConnections,
-			MaxConnLifetime:   cfg.Database.MaxConnectionLife,
-			MaxConnIdleTime:   cfg.Database.MaxConnectionIdle,
-			HealthCheckPeriod: cfg.Database.HealthCheckPeriod,
-		})
-		if err != nil {
-			return err
-		}
-		defer pool.Close()
-		if err := postgres.VerifySchema(shutdownSignals, pool); err != nil {
-			return fmt.Errorf("verify database schema: %w", err)
-		}
-		dependencies.TaskStore, err = postgres.NewStore(pool)
-		if err != nil {
-			return err
-		}
+	defer runtime.close()
+	workerErrors := runtime.start(runContext)
+	runtimeFailure := make(chan error, 1)
+	if len(runtime.workers) > 0 {
+		go func() {
+			if workerErr := <-workerErrors; workerErr != nil {
+				logger.Error("background worker failed", "error", workerErr)
+				runtimeFailure <- workerErr
+				cancel()
+			}
+		}()
 	}
 
-	handler, err := appserver.New(cfg, dependencies)
+	handler, err := appserver.New(cfg, runtime.dependencies)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
@@ -95,7 +64,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	go func() {
-		<-shutdownSignals.Done()
+		<-runContext.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
@@ -104,8 +73,16 @@ func run(logger *slog.Logger) error {
 	}()
 
 	logger.Info("starting A2A server", "address", server.Addr, "environment", cfg.Environment)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve HTTP: %w", err)
+	serveErr := server.ListenAndServe()
+	cancel()
+	runtime.wait()
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("serve HTTP: %w", serveErr)
+	}
+	select {
+	case workerErr := <-runtimeFailure:
+		return fmt.Errorf("background worker failed: %w", workerErr)
+	default:
 	}
 	return nil
 }
