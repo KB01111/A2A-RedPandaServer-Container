@@ -159,7 +159,7 @@ func loadOIDCConfig(environment string) (OIDCConfig, error) {
 		if environment != "development" && environment != "test" {
 			return OIDCConfig{}, fmt.Errorf("OIDC_ISSUER must use HTTPS in staging and production")
 		}
-		if !isLoopbackHost(parsedIssuer.Hostname()) {
+		if !IsLoopbackHost(parsedIssuer.Hostname()) {
 			return OIDCConfig{}, fmt.Errorf("OIDC_ISSUER must use HTTPS except for loopback development")
 		}
 	}
@@ -208,7 +208,8 @@ func AllowedOIDCAlgorithm(algorithm string) bool {
 	}
 }
 
-func isLoopbackHost(host string) bool {
+// IsLoopbackHost reports whether host is localhost or a loopback IP literal.
+func IsLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}

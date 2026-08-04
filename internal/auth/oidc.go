@@ -120,21 +120,13 @@ func validateRemoteURL(raw string, allowLoopbackHTTP, allowQuery bool) (*url.URL
 	switch strings.ToLower(parsed.Scheme) {
 	case "https":
 	case "http":
-		if !allowLoopbackHTTP || !isLoopbackHost(parsed.Hostname()) {
+		if !allowLoopbackHTTP || !config.IsLoopbackHost(parsed.Hostname()) {
 			return nil, fmt.Errorf("must use HTTPS except for a loopback development issuer")
 		}
 	default:
 		return nil, fmt.Errorf("must use HTTP or HTTPS")
 	}
 	return parsed, nil
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	address := net.ParseIP(host)
-	return address != nil && address.IsLoopback()
 }
 
 func secureOIDCHTTPClient(source *http.Client, cfg config.OIDCConfig) (*http.Client, error) {
