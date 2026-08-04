@@ -77,8 +77,75 @@ password/service environment fallbacks are rejected.
 
 The server is a stateless protocol and orchestration process. Agent workers,
 PostgreSQL, Redpanda, S3-compatible storage, OpenResty, and the observability
-stack run separately. The development loopback dispatcher is deterministic and
-exists only for the protocol-core phase and local tests; the production wiring
-will replace it with the Redpanda dispatcher before the first release. Until
-then, the executable refuses staging and production startup and the server
-constructor requires an explicit non-memory task store in those environments.
+stack run separately. The deterministic loopback dispatcher is available only
+when Redpanda is omitted in development or tests. Staging and production fail
+startup unless OIDC, PostgreSQL, Redpanda, S3, and webhook delivery are all
+configured.
+
+## Durable Redpanda orchestration
+
+The bridge uses three fixed, versioned topics derived from
+`REDPANDA_TOPIC_PREFIX`:
+
+- `.agent-commands.v1` for execute and cancel commands;
+- `.agent-results.v1` for artifacts, heartbeats, and terminal results;
+- `.agent-dlq.v1` for malformed result records.
+
+Every record uses a strict `bridge.a2a.redpanda/v1` JSON envelope. Event,
+execution, command, tenant, task, context, sequence, deadline, principal, and
+trace fields are validated before publication or ingestion. Record keys and
+identifiers are domain-separated, length-prefixed SHA-256 digests. The same
+tenant/task key keeps one task's records on one partition.
+
+Commands first commit to the PostgreSQL outbox. A leased worker publishes them
+with franz-go's idempotent producer defaults and all-ISR acknowledgements.
+Result consumers disable auto-commit and hold rebalances while processing each
+poll: a valid record commits to the PostgreSQL result inbox before its Kafka
+offset is committed; an invalid record commits to the DLQ before its source
+offset is committed. Broker-position, event-ID, and execution-sequence
+constraints make replay idempotent. Delivery is therefore at least once; the
+database identities provide business-level deduplication rather than claiming
+end-to-end exactly-once semantics.
+
+TLS 1.2+, SCRAM-SHA-256, bounded message sizes, manual offset commits, and
+automatic-topic-creation-off are the production defaults. Topic creation and
+retention are operator-owned infrastructure concerns.
+
+## Artifact boundary
+
+Raw artifact parts remain inline only within configured per-part,
+per-artifact, and per-task budgets. Larger parts are uploaded to the private
+S3/MinIO bucket with deterministic owner-scoped keys, SHA-256 metadata,
+verified size/checksum, and SSE-S3 (`AES256`). Task events contain stable
+application URLs such as `/artifacts/{opaque-id}`, never presigned URLs.
+
+An uploaded object begins in `ready`. Its metadata changes to `attached` in the
+same PostgreSQL transaction that stores the URL-bearing task version; the
+create path also scans the initial task snapshot. Missing or cross-owner object
+references roll the task write back. The authenticated resolver compares the
+exact issuer, tenant, and subject, then returns a fresh GET-only presign with a
+maximum 15-minute lifetime. Invalid, unattached, absent, and cross-owner IDs
+all return not-found.
+
+The AWS SDK is constructed from an explicit `aws.Config` and static credentials
+read from mounted files. It never consults the default AWS credential chain,
+proxy environment, IMDS, SSO, or shared profile files.
+
+## Push notifications and webhook delivery
+
+The official SDK's `WithPushNotifications` option remains the protocol entry
+point. Push configurations are owner-scoped and encrypted with versioned
+AES-256-GCM key material. Callback URLs must use HTTPS in production and may
+not contain user information, query parameters, or fragments; notification
+tokens and Basic/Bearer credentials stay encrypted.
+
+Each task version inserts its webhook event into the PostgreSQL outbox inside
+the task transaction. A domain-separated deterministic delivery ID makes the
+SDK's subsequent `SendPush` call idempotently converge on that row. Workers
+claim leases before network I/O, deliver concurrently, and finish with
+lease-token compare-and-swap updates. Redirects and proxy discovery are
+disabled, TLS 1.2+ is required, DNS results are validated again at dial time,
+and private/special-use targets are blocked outside development/test. Requests
+carry an Ed25519 signature plus a stable delivery ID. Retryable network errors,
+408, 425, 429, and 5xx responses use bounded exponential backoff with jitter;
+other 4xx responses are terminal. Attempts and total retry age are bounded.

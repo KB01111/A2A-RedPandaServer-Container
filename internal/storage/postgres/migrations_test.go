@@ -11,12 +11,13 @@ func TestEmbeddedMigrationsAreOrderedAndChecksummed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readMigrations() error = %v", err)
 	}
-	if len(migrations) != 1 || migrations[0].version != 1 || CurrentSchemaVersion() != 1 {
+	if len(migrations) != 2 || migrations[0].version != 1 || migrations[1].version != 2 || CurrentSchemaVersion() != 2 {
 		t.Fatalf("migrations = %#v, current = %d", migrations, CurrentSchemaVersion())
 	}
 
 	applied := map[int64]appliedMigration{
 		migrations[0].version: {name: migrations[0].name, checksum: migrations[0].checksum[:]},
+		migrations[1].version: {name: migrations[1].name, checksum: migrations[1].checksum[:]},
 	}
 	if err := verifyMigrationSet(migrations, applied, false); err != nil {
 		t.Fatalf("verifyMigrationSet() error = %v", err)
@@ -26,6 +27,15 @@ func TestEmbeddedMigrationsAreOrderedAndChecksummed(t *testing.T) {
 	}
 	if err := verifyMigrationSet(migrations, nil, false); err == nil {
 		t.Fatal("pending migration passed schema verification")
+	}
+	partial := map[int64]appliedMigration{
+		migrations[0].version: {name: migrations[0].name, checksum: migrations[0].checksum[:]},
+	}
+	if err := verifyMigrationSet(migrations, partial, true); err != nil {
+		t.Fatalf("forward pending migration was rejected during migrate: %v", err)
+	}
+	if err := verifyMigrationSet(migrations, partial, false); err == nil {
+		t.Fatal("forward pending migration passed schema verification")
 	}
 
 	applied[migrations[0].version] = appliedMigration{name: migrations[0].name, checksum: []byte("tampered")}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KB01111/A2A-RedPandaServer-Container/internal/artifact"
 	appauth "github.com/KB01111/A2A-RedPandaServer-Container/internal/auth"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
@@ -24,17 +25,43 @@ const (
 // Store is a PostgreSQL-backed A2A task store. All access is scoped to the
 // verified tenant and subject carried by auth.Identity in the request context.
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	eventSink TaskEventSink
+}
+
+type TaskEventSink interface {
+	EnqueueTaskEvent(context.Context, pgx.Tx, appauth.Identity, a2a.TaskID, taskstore.TaskVersion, a2a.Event) error
+}
+
+type StoreOption func(*Store) error
+
+func WithTaskEventSink(sink TaskEventSink) StoreOption {
+	return func(store *Store) error {
+		if sink == nil {
+			return fmt.Errorf("task event sink is required")
+		}
+		store.eventSink = sink
+		return nil
+	}
 }
 
 var _ taskstore.Store = (*Store)(nil)
 
 // NewStore creates a PostgreSQL task store.
-func NewStore(pool *pgxpool.Pool) (*Store, error) {
+func NewStore(pool *pgxpool.Pool, options ...StoreOption) (*Store, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("PostgreSQL pool is required")
 	}
-	return &Store{pool: pool}, nil
+	store := &Store{pool: pool}
+	for _, option := range options {
+		if option == nil {
+			return nil, fmt.Errorf("task store option is required")
+		}
+		if err := option(store); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
 }
 
 // Create persists a new task at version 1.
@@ -51,8 +78,10 @@ func (s *Store) Create(ctx context.Context, task *a2a.Task) (taskstore.TaskVersi
 		return taskstore.TaskVersionMissing, err
 	}
 
-	var version int64
-	err = s.pool.QueryRow(ctx, `
+	var createdVersion taskstore.TaskVersion
+	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		var version int64
+		err := tx.QueryRow(ctx, `
 INSERT INTO a2a_tasks (
     task_id, tenant_id, owner_issuer, owner_subject, context_id,
     state, status_timestamp, task_json, version
@@ -60,16 +89,32 @@ INSERT INTO a2a_tasks (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 1)
 ON CONFLICT (task_id) DO NOTHING
 RETURNING version`,
-		string(task.ID), identity.Tenant, identity.Issuer, identity.Subject, task.ContextID,
-		string(task.Status.State), task.Status.Timestamp, string(payload),
-	).Scan(&version)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return taskstore.TaskVersionMissing, taskstore.ErrTaskAlreadyExists
-	}
+			string(task.ID), identity.Tenant, identity.Issuer, identity.Subject, task.ContextID,
+			string(task.Status.State), task.Status.Timestamp, string(payload),
+		).Scan(&version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return taskstore.ErrTaskAlreadyExists
+		}
+		if err != nil {
+			return fmt.Errorf("create task: %w", err)
+		}
+		if err := attachTaskArtifactObjects(ctx, tx, artifact.Owner{
+			Issuer: identity.Issuer, Tenant: identity.Tenant, Subject: identity.Subject,
+		}, task); err != nil {
+			return err
+		}
+		createdVersion = taskstore.TaskVersion(version)
+		if s.eventSink != nil {
+			if err := s.eventSink.EnqueueTaskEvent(ctx, tx, identity, task.ID, createdVersion, task); err != nil {
+				return fmt.Errorf("enqueue created task event: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return taskstore.TaskVersionMissing, fmt.Errorf("create task: %w", err)
+		return taskstore.TaskVersionMissing, err
 	}
-	return taskstore.TaskVersion(version), nil
+	return createdVersion, nil
 }
 
 // Update atomically replaces a task and increments its store version.
@@ -121,7 +166,17 @@ RETURNING version`,
 		).Scan(&version); err != nil {
 			return fmt.Errorf("update task: %w", err)
 		}
+		if err := attachArtifactObjects(ctx, tx, artifact.Owner{
+			Issuer: identity.Issuer, Tenant: identity.Tenant, Subject: identity.Subject,
+		}, request.Task.ID, request.Event); err != nil {
+			return err
+		}
 		updatedVersion = taskstore.TaskVersion(version)
+		if s.eventSink != nil {
+			if err := s.eventSink.EnqueueTaskEvent(ctx, tx, identity, request.Task.ID, updatedVersion, request.Event); err != nil {
+				return fmt.Errorf("enqueue task update event: %w", err)
+			}
+		}
 		return nil
 	})
 	if err != nil {

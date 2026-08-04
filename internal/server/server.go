@@ -7,19 +7,25 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/KB01111/A2A-RedPandaServer-Container/internal/artifact"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/auth"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/config"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/orchestrator"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/push"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 )
 
 type Dependencies struct {
-	Dispatcher     orchestrator.Dispatcher
-	TaskStore      taskstore.Store
-	Logger         *slog.Logger
-	Authentication *auth.Authenticator
+	Dispatcher       orchestrator.Dispatcher
+	TaskStore        taskstore.Store
+	Logger           *slog.Logger
+	Authentication   *auth.Authenticator
+	PushConfigStore  push.ConfigStore
+	PushSender       push.Sender
+	ArtifactPipeline *orchestrator.ArtifactPipeline
+	ArtifactResolver artifact.DownloadResolver
 }
 
 func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
@@ -39,7 +45,12 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 	if dependencies.Logger == nil {
 		dependencies.Logger = slog.Default()
 	}
-	executor, err := orchestrator.NewExecutor(dependencies.Dispatcher, dependencies.Logger)
+	var executor *orchestrator.Executor
+	if dependencies.ArtifactPipeline != nil {
+		executor, err = orchestrator.NewExecutorWithArtifacts(dependencies.Dispatcher, *dependencies.ArtifactPipeline, dependencies.Logger)
+	} else {
+		executor, err = orchestrator.NewExecutor(dependencies.Dispatcher, dependencies.Logger)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -59,13 +70,19 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 	if dependencies.Authentication != nil {
 		dependencies.Authentication.ConfigureAgentCard(card)
 	}
+	pushConfigured := dependencies.PushConfigStore != nil || dependencies.PushSender != nil
+	if pushConfigured && (dependencies.PushConfigStore == nil || dependencies.PushSender == nil) {
+		return nil, fmt.Errorf("push configuration store and sender must be configured together")
+	}
+	if pushConfigured {
+		card.Capabilities.PushNotifications = true
+	}
 	interceptors := []a2asrv.CallInterceptor{protocolVersionInterceptor{}}
 	if dependencies.Authentication != nil {
 		interceptors = append(interceptors, dependencies.Authentication.CallInterceptor())
 	}
 	interceptors = append(interceptors, errorBoundaryInterceptor{logger: dependencies.Logger})
-	requestHandler := a2asrv.NewHandler(
-		executor,
+	requestOptions := []a2asrv.RequestHandlerOption{
 		a2asrv.WithTaskStore(dependencies.TaskStore),
 		a2asrv.WithCapabilityChecks(&card.Capabilities),
 		a2asrv.WithCallInterceptors(interceptors...),
@@ -75,10 +92,22 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 			return a2a.ErrInternalError
 		}),
 		a2asrv.WithLogger(dependencies.Logger),
-	)
+	}
+	if pushConfigured {
+		requestOptions = append(requestOptions, a2asrv.WithPushNotifications(dependencies.PushConfigStore, dependencies.PushSender))
+	}
+	requestHandler := a2asrv.NewHandler(executor, requestOptions...)
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
+	if dependencies.ArtifactResolver != nil {
+		if dependencies.Authentication == nil {
+			return nil, fmt.Errorf("artifact resolver requires authentication")
+		}
+		mux.Handle("GET /artifacts/{objectID}", dependencies.Authentication.Middleware(
+			newArtifactDownloadHandler(dependencies.ArtifactResolver, dependencies.Logger),
+		))
+	}
 	restHandler := a2asrv.NewRESTHandler(
 		requestHandler,
 		a2asrv.WithTransportKeepAlive(cfg.KeepAlive),

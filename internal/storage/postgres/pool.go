@@ -3,17 +3,14 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/KB01111/A2A-RedPandaServer-Container/internal/secretfile"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-const maxPasswordFileBytes = 64 * 1024
 
 // PoolConfig configures the PostgreSQL connection pool.
 type PoolConfig struct {
@@ -114,37 +111,5 @@ func parsePoolConfig(cfg PoolConfig) (*pgxpool.Config, error) {
 }
 
 func readPasswordFile(path string) (string, error) {
-	file, err := os.Open(path) // #nosec G304 -- operator-supplied secret-file path.
-	if err != nil {
-		return "", fmt.Errorf("open database password file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return "", fmt.Errorf("stat database password file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("database password file must be a regular file")
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("database password file permissions must not grant group or other access")
-	}
-	if info.Size() > maxPasswordFileBytes {
-		return "", fmt.Errorf("database password file exceeds %d bytes", maxPasswordFileBytes)
-	}
-	contents, err := io.ReadAll(io.LimitReader(file, maxPasswordFileBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("read database password file: %w", err)
-	}
-	if len(contents) > maxPasswordFileBytes {
-		return "", fmt.Errorf("database password file exceeds %d bytes", maxPasswordFileBytes)
-	}
-	password := strings.TrimRight(string(contents), "\r\n")
-	if password == "" {
-		return "", fmt.Errorf("database password file is empty")
-	}
-	if strings.IndexByte(password, 0) >= 0 {
-		return "", fmt.Errorf("database password file contains a NUL byte")
-	}
-	return password, nil
+	return secretfile.ReadString(path, "database password", secretfile.DefaultMaxBytes)
 }
