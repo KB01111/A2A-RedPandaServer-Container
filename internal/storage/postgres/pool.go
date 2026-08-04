@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -55,6 +57,26 @@ func parsePoolConfig(cfg PoolConfig) (*pgxpool.Config, error) {
 	if cfg.MaxConns > 0 && cfg.MinConns > cfg.MaxConns {
 		return nil, fmt.Errorf("database pool minimum connections must not exceed maximum connections")
 	}
+	for _, key := range []string{"PGPASSWORD", "PGPASSFILE", "PGSSLPASSWORD", "PGSERVICE", "PGSERVICEFILE"} {
+		if os.Getenv(key) != "" {
+			return nil, fmt.Errorf("%s is not allowed; use the explicit database password file configuration", key)
+		}
+	}
+	parsedURL, err := url.Parse(databaseURL)
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "postgres" && parsedURL.Scheme != "postgresql") {
+		return nil, fmt.Errorf("database URL must be an absolute PostgreSQL URL")
+	}
+	if parsedURL.User != nil {
+		if _, hasPassword := parsedURL.User.Password(); hasPassword {
+			return nil, fmt.Errorf("database URL must not contain a password; use the database password file")
+		}
+	}
+	for key := range parsedURL.Query() {
+		switch strings.ToLower(key) {
+		case "password", "sslpassword", "passfile", "service", "servicefile":
+			return nil, fmt.Errorf("database URL must not contain implicit credential sources; use the database password file")
+		}
+	}
 
 	poolConfig, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -92,7 +114,12 @@ func parsePoolConfig(cfg PoolConfig) (*pgxpool.Config, error) {
 }
 
 func readPasswordFile(path string) (string, error) {
-	info, err := os.Stat(path)
+	file, err := os.Open(path) // #nosec G304 -- operator-supplied secret-file path.
+	if err != nil {
+		return "", fmt.Errorf("open database password file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
 	if err != nil {
 		return "", fmt.Errorf("stat database password file: %w", err)
 	}
@@ -105,9 +132,12 @@ func readPasswordFile(path string) (string, error) {
 	if info.Size() > maxPasswordFileBytes {
 		return "", fmt.Errorf("database password file exceeds %d bytes", maxPasswordFileBytes)
 	}
-	contents, err := os.ReadFile(path)
+	contents, err := io.ReadAll(io.LimitReader(file, maxPasswordFileBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read database password file: %w", err)
+	}
+	if len(contents) > maxPasswordFileBytes {
+		return "", fmt.Errorf("database password file exceeds %d bytes", maxPasswordFileBytes)
 	}
 	password := strings.TrimRight(string(contents), "\r\n")
 	if password == "" {

@@ -1,6 +1,8 @@
 package postgres
 
 import (
+	"crypto/sha256"
+	"strings"
 	"testing"
 )
 
@@ -29,5 +31,20 @@ func TestEmbeddedMigrationsAreOrderedAndChecksummed(t *testing.T) {
 	applied[migrations[0].version] = appliedMigration{name: migrations[0].name, checksum: []byte("tampered")}
 	if err := verifyMigrationSet(migrations, applied, false); err == nil {
 		t.Fatal("tampered checksum passed verification")
+	}
+}
+
+func TestVerifyMigrationSetRejectsLedgerGap(t *testing.T) {
+	firstChecksum := sha256.Sum256([]byte("first"))
+	secondChecksum := sha256.Sum256([]byte("second"))
+	migrations := []migration{
+		{version: 1, name: "0001_first.sql", checksum: firstChecksum},
+		{version: 2, name: "0002_second.sql", checksum: secondChecksum},
+	}
+	applied := map[int64]appliedMigration{
+		2: {name: migrations[1].name, checksum: migrations[1].checksum[:]},
+	}
+	if err := verifyMigrationSet(migrations, applied, true); err == nil || !strings.Contains(err.Error(), "gap") {
+		t.Fatalf("verifyMigrationSet() error = %v, want ledger gap", err)
 	}
 }

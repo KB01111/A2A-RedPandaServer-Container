@@ -59,3 +59,30 @@ func TestParsePoolConfigValidation(t *testing.T) {
 		t.Fatal("empty password file succeeded")
 	}
 }
+
+func TestParsePoolConfigRejectsImplicitCredentialEnvironment(t *testing.T) {
+	for _, key := range []string{"PGPASSWORD", "PGPASSFILE", "PGSSLPASSWORD", "PGSERVICE", "PGSERVICEFILE"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, "secret")
+			if _, err := parsePoolConfig(PoolConfig{DatabaseURL: "postgresql://bridge@localhost/db"}); err == nil {
+				t.Fatal("parsePoolConfig() error = nil, want implicit credential rejection")
+			}
+		})
+	}
+	t.Run("whitespace PGSSLPASSWORD", func(t *testing.T) {
+		t.Setenv("PGSSLPASSWORD", " ")
+		if _, err := parsePoolConfig(PoolConfig{DatabaseURL: "postgresql://bridge@localhost/db"}); err == nil {
+			t.Fatal("parsePoolConfig() error = nil, want whitespace credential rejection")
+		}
+	})
+}
+
+func TestParsePoolConfigRejectsImplicitCredentialURLParameters(t *testing.T) {
+	for _, parameter := range []string{"password=secret", "sslpassword=secret", "passfile=/run/secrets/pgpass", "service=secret", "servicefile=/run/secrets/service"} {
+		t.Run(parameter, func(t *testing.T) {
+			if _, err := parsePoolConfig(PoolConfig{DatabaseURL: "postgresql://bridge@localhost/db?" + parameter}); err == nil {
+				t.Fatal("parsePoolConfig() error = nil, want implicit credential rejection")
+			}
+		})
+	}
+}

@@ -42,6 +42,11 @@ func NewAuthenticator(verifier Verifier, issuer string, requiredScopes []string)
 	if len(requiredScopes) == 0 {
 		return nil, fmt.Errorf("at least one required scope is required")
 	}
+	for _, scope := range requiredScopes {
+		if !validScopeToken(scope) {
+			return nil, fmt.Errorf("required scope %q is invalid", scope)
+		}
+	}
 	return &Authenticator{
 		verifier:       verifier,
 		issuer:         issuer,
@@ -53,17 +58,17 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		rawToken, err := bearerToken(request.Header.Values("Authorization"))
 		if err != nil {
-			writeAuthError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "valid bearer authentication is required")
+			writeAuthError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "valid bearer authentication is required", "")
 			return
 		}
 		identity, err := a.verifier.Verify(request.Context(), rawToken)
 		if err != nil || identity.Issuer != a.issuer || identity.Subject == "" || identity.Tenant == "" {
-			writeAuthError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "valid bearer authentication is required")
+			writeAuthError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "valid bearer authentication is required", "")
 			return
 		}
 		for _, required := range a.requiredScopes {
 			if !slices.Contains(identity.Scopes, required) {
-				writeAuthError(response, http.StatusForbidden, "PERMISSION_DENIED", "required scope is missing")
+				writeAuthError(response, http.StatusForbidden, "PERMISSION_DENIED", "required scope is missing", strings.Join(a.requiredScopes, " "))
 				return
 			}
 		}
@@ -239,19 +244,40 @@ func validBearerCredential(value string) bool {
 	return content
 }
 
-func writeAuthError(response http.ResponseWriter, status int, code, message string) {
+func validScopeToken(scope string) bool {
+	if scope == "" {
+		return false
+	}
+	for index := 0; index < len(scope); index++ {
+		character := scope[index]
+		if character < 0x21 || character > 0x7e || character == '"' || character == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+type authErrorResponse struct {
+	Error authError `json:"error"`
+}
+
+type authError struct {
+	Code    int    `json:"code"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+func writeAuthError(response http.ResponseWriter, status int, code, message, scope string) {
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")
 	if status == http.StatusUnauthorized {
 		response.Header().Set("WWW-Authenticate", `Bearer realm="bridge-a2a", error="invalid_token"`)
+	} else if status == http.StatusForbidden {
+		response.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="bridge-a2a", error="insufficient_scope", scope="%s"`, scope))
 	}
 	response.WriteHeader(status)
-	_ = json.NewEncoder(response).Encode(map[string]any{
-		"error": map[string]any{
-			"code":    status,
-			"status":  code,
-			"message": message,
-		},
+	_ = json.NewEncoder(response).Encode(authErrorResponse{
+		Error: authError{Code: status, Status: code, Message: message},
 	})
 }
 

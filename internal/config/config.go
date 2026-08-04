@@ -33,6 +33,7 @@ type OIDCConfig struct {
 	RequiredScopes    []string
 	ClockSkew         time.Duration
 	HTTPTimeout       time.Duration
+	AllowPrivateIPs   bool
 }
 
 func (c OIDCConfig) Enabled() bool { return c.Issuer != "" }
@@ -95,7 +96,7 @@ func Load() (Config, error) {
 	if environment == "staging" || environment == "production" {
 		agentCardPath = "/app/config/agent-card.json"
 	}
-	oidcConfig, err := loadOIDCConfig()
+	oidcConfig, err := loadOIDCConfig(environment)
 	if err != nil {
 		return Config{}, err
 	}
@@ -130,10 +131,21 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func loadOIDCConfig() (OIDCConfig, error) {
+func loadOIDCConfig(environment string) (OIDCConfig, error) {
 	issuer := strings.TrimSpace(os.Getenv("OIDC_ISSUER"))
 	audience := strings.TrimSpace(os.Getenv("OIDC_AUDIENCE"))
 	if issuer == "" && audience == "" {
+		for _, key := range []string{
+			"OIDC_TENANT_CLAIM",
+			"OIDC_REQUIRED_SCOPES",
+			"OIDC_ALLOWED_ALGORITHMS",
+			"OIDC_CLOCK_SKEW",
+			"OIDC_HTTP_TIMEOUT",
+		} {
+			if strings.TrimSpace(os.Getenv(key)) != "" {
+				return OIDCConfig{}, fmt.Errorf("%s requires OIDC_ISSUER and OIDC_AUDIENCE", key)
+			}
+		}
 		return OIDCConfig{}, nil
 	}
 	if issuer == "" || audience == "" {
@@ -143,8 +155,13 @@ func loadOIDCConfig() (OIDCConfig, error) {
 	if err != nil || parsedIssuer.Host == "" || (parsedIssuer.Scheme != "http" && parsedIssuer.Scheme != "https") || parsedIssuer.User != nil || parsedIssuer.RawQuery != "" || parsedIssuer.Fragment != "" {
 		return OIDCConfig{}, fmt.Errorf("OIDC_ISSUER must be an absolute HTTP(S) URL without credentials, query, or fragment")
 	}
-	if parsedIssuer.Scheme != "https" && !isLoopbackHost(parsedIssuer.Hostname()) {
-		return OIDCConfig{}, fmt.Errorf("OIDC_ISSUER must use HTTPS except for loopback development")
+	if parsedIssuer.Scheme != "https" {
+		if environment != "development" && environment != "test" {
+			return OIDCConfig{}, fmt.Errorf("OIDC_ISSUER must use HTTPS in staging and production")
+		}
+		if !isLoopbackHost(parsedIssuer.Hostname()) {
+			return OIDCConfig{}, fmt.Errorf("OIDC_ISSUER must use HTTPS except for loopback development")
+		}
 	}
 	clockSkew, err := time.ParseDuration(envOrDefault("OIDC_CLOCK_SKEW", "1m"))
 	if err != nil || clockSkew < 0 || clockSkew > 5*time.Minute {
@@ -155,13 +172,8 @@ func loadOIDCConfig() (OIDCConfig, error) {
 		return OIDCConfig{}, fmt.Errorf("OIDC_HTTP_TIMEOUT must be a positive duration")
 	}
 	algorithms := splitCSV(envOrDefault("OIDC_ALLOWED_ALGORITHMS", "RS256"))
-	allowedAlgorithms := map[string]bool{
-		"RS256": true, "RS384": true, "RS512": true,
-		"PS256": true, "PS384": true, "PS512": true,
-		"ES256": true, "ES384": true, "ES512": true,
-	}
 	for _, algorithm := range algorithms {
-		if !allowedAlgorithms[algorithm] {
+		if !AllowedOIDCAlgorithm(algorithm) {
 			return OIDCConfig{}, fmt.Errorf("OIDC_ALLOWED_ALGORITHMS contains unsafe or unsupported algorithm %q", algorithm)
 		}
 	}
@@ -181,7 +193,19 @@ func loadOIDCConfig() (OIDCConfig, error) {
 		RequiredScopes:    requiredScopes,
 		ClockSkew:         clockSkew,
 		HTTPTimeout:       httpTimeout,
+		AllowPrivateIPs:   environment == "development" || environment == "test",
 	}, nil
+}
+
+// AllowedOIDCAlgorithm reports whether an asymmetric signing algorithm is
+// accepted by both configuration loading and runtime verifier construction.
+func AllowedOIDCAlgorithm(algorithm string) bool {
+	switch algorithm {
+	case "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512":
+		return true
+	default:
+		return false
+	}
 }
 
 func isLoopbackHost(host string) bool {
@@ -208,6 +232,12 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 	if parsedURL.User != nil {
 		if _, hasPassword := parsedURL.User.Password(); hasPassword {
 			return DatabaseConfig{}, fmt.Errorf("DATABASE_URL must not contain a password; use DATABASE_PASSWORD_FILE")
+		}
+	}
+	for key := range parsedURL.Query() {
+		switch strings.ToLower(key) {
+		case "password", "sslpassword", "passfile", "service", "servicefile":
+			return DatabaseConfig{}, fmt.Errorf("DATABASE_URL must not contain implicit credential sources; use DATABASE_PASSWORD_FILE")
 		}
 	}
 	if passwordFile != "" && !filepath.IsAbs(passwordFile) && !strings.HasPrefix(passwordFile, "/") {
@@ -246,7 +276,7 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 
 func splitCSV(value string) []string {
 	var result []string
-	for item := range strings.SplitSeq(value, ",") {
+	for _, item := range strings.Split(value, ",") {
 		if item = strings.TrimSpace(item); item != "" {
 			result = append(result, item)
 		}

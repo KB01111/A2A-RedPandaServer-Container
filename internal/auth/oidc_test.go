@@ -13,8 +13,12 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,18 +111,9 @@ func TestOIDCVerifierMapsVerifierErrorsToStableError(t *testing.T) {
 		tenantClaim:    "tenant_id",
 		now:            time.Now,
 	}
-	if _, err := verifier.Verify(context.Background(), "secret"); !errors.Is(err, ErrInvalidToken) || stringsContain(err.Error(), "signature") {
+	if _, err := verifier.Verify(context.Background(), "secret"); !errors.Is(err, ErrInvalidToken) || strings.Contains(err.Error(), "signature") {
 		t.Fatalf("Verify() error = %v", err)
 	}
-}
-
-func stringsContain(value, fragment string) bool {
-	for i := 0; i+len(fragment) <= len(value); i++ {
-		if value[i:i+len(fragment)] == fragment {
-			return true
-		}
-	}
-	return false
 }
 
 func TestOIDCVerifierEndToEndJWTValidation(t *testing.T) {
@@ -164,7 +159,7 @@ func TestOIDCVerifierEndToEndJWTValidation(t *testing.T) {
 				}
 				return
 			}
-			if err != ErrInvalidToken {
+			if !errors.Is(err, ErrInvalidToken) {
 				t.Fatalf("Verify() error = %v, want stable ErrInvalidToken", err)
 			}
 			if identity.Issuer != "" || identity.Subject != "" || identity.Tenant != "" || len(identity.Scopes) != 0 {
@@ -216,7 +211,7 @@ func TestOIDCVerifierJWKSRotationCacheAndOutage(t *testing.T) {
 	}
 
 	unknownToken := signTestJWT(t, unknownKey, nil, "unknown", oidc.RS256, claims)
-	if _, err := verifier.Verify(context.Background(), unknownToken); err != ErrInvalidToken {
+	if _, err := verifier.Verify(context.Background(), unknownToken); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("unknown key during outage error = %v", err)
 	}
 	if requests := provider.keyRequestCount(); requests != 3 {
@@ -231,7 +226,7 @@ func TestNewOIDCVerifierRejectsIssuerMismatchAndUnsafeJWKS(t *testing.T) {
 	t.Run("issuer mismatch", func(t *testing.T) {
 		provider := newTestOIDCProvider(t)
 		provider.setIssuerOverride(provider.server.URL + "/different")
-		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err == nil || !stringsContain(err.Error(), "discover OIDC provider") {
+		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err == nil || !strings.Contains(err.Error(), "discover OIDC provider") {
 			t.Fatalf("newOIDCVerifier() error = %v", err)
 		}
 	})
@@ -239,10 +234,155 @@ func TestNewOIDCVerifierRejectsIssuerMismatchAndUnsafeJWKS(t *testing.T) {
 	t.Run("unsafe jwks downgrade", func(t *testing.T) {
 		provider := newTestOIDCProvider(t)
 		provider.setJWKSOverride("http://169.254.169.254/latest/meta-data")
-		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err == nil || !stringsContain(err.Error(), "unsafe OIDC jwks_uri") {
+		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err == nil || !strings.Contains(err.Error(), "unsafe OIDC jwks_uri") {
 			t.Fatalf("newOIDCVerifier() error = %v", err)
 		}
 	})
+}
+
+func TestNewOIDCVerifierBlocksPrivateDestinationInProductionMode(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowPrivateIPs = false
+	if _, err := newOIDCVerifier(context.Background(), cfg, provider.server.Client()); err == nil || !strings.Contains(err.Error(), "private or special-use") {
+		t.Fatalf("newOIDCVerifier() error = %v, want private-address rejection", err)
+	}
+}
+
+func TestPublicOIDCAddress(t *testing.T) {
+	tests := []struct {
+		address string
+		want    bool
+	}{
+		{address: "8.8.8.8", want: true},
+		{address: "2606:4700:4700::1111", want: true},
+		{address: "127.0.0.1"},
+		{address: "10.0.0.1"},
+		{address: "169.254.169.254"},
+		{address: "100.64.0.1"},
+		{address: "198.18.0.1"},
+		{address: "192.0.2.1"},
+		{address: "::1"},
+		{address: "fc00::1"},
+		{address: "fe80::1"},
+		{address: "2001:db8::1"},
+	}
+	for _, test := range tests {
+		t.Run(test.address, func(t *testing.T) {
+			if got := publicOIDCAddress(netip.MustParseAddr(test.address)); got != test.want {
+				t.Fatalf("publicOIDCAddress(%q) = %v, want %v", test.address, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNewOIDCVerifierEnforcesIssuerOrigin(t *testing.T) {
+	t.Run("rejects HTTPS jwks_uri on a different host", func(t *testing.T) {
+		var targetRequests atomic.Int32
+		target := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			targetRequests.Add(1)
+		}))
+		t.Cleanup(target.Close)
+
+		provider := newTestOIDCProvider(t)
+		provider.setJWKSOverride(urlWithHostname(t, target.URL, "localhost"))
+		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err == nil || !strings.Contains(err.Error(), "unsafe OIDC jwks_uri") {
+			t.Fatalf("newOIDCVerifier() error = %v", err)
+		}
+		if requests := targetRequests.Load(); requests != 0 {
+			t.Fatalf("different-host JWKS requests = %d, want 0", requests)
+		}
+	})
+
+	t.Run("rejects discovery redirect to a different host", func(t *testing.T) {
+		var targetRequests atomic.Int32
+		target := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			targetRequests.Add(1)
+		}))
+		t.Cleanup(target.Close)
+
+		provider := newTestOIDCProvider(t)
+		provider.setDiscoveryRedirect(urlWithHostname(t, target.URL, "localhost"))
+		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err == nil || !strings.Contains(err.Error(), "unsafe OIDC redirect") {
+			t.Fatalf("newOIDCVerifier() error = %v", err)
+		}
+		if requests := targetRequests.Load(); requests != 0 {
+			t.Fatalf("different-host discovery requests = %d, want 0", requests)
+		}
+	})
+
+	t.Run("allows same-origin discovery path redirect", func(t *testing.T) {
+		provider := newTestOIDCProvider(t)
+		provider.setDiscoveryRedirect(provider.server.URL + "/redirected/openid-configuration")
+		if _, err := newOIDCVerifier(context.Background(), provider.config(), provider.server.Client()); err != nil {
+			t.Fatalf("newOIDCVerifier() error = %v", err)
+		}
+	})
+
+	t.Run("rejects JWKS redirect to a different host", func(t *testing.T) {
+		var targetRequests atomic.Int32
+		target := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			targetRequests.Add(1)
+		}))
+		t.Cleanup(target.Close)
+
+		provider := newTestOIDCProvider(t)
+		provider.setJWKSRedirect(urlWithHostname(t, target.URL, "localhost"))
+		verifier := provider.newVerifier(t)
+		key := generateRSAKey(t)
+		token := signTestJWT(t, key, nil, "redirected", oidc.RS256, map[string]any{
+			"iss":       provider.server.URL,
+			"aud":       "bridge-a2a",
+			"sub":       "user-1",
+			"tenant_id": "tenant-1",
+			"exp":       time.Now().Add(10 * time.Minute).Unix(),
+		})
+		if _, err := verifier.Verify(context.Background(), token); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("Verify() error = %v, want stable ErrInvalidToken", err)
+		}
+		if requests := targetRequests.Load(); requests != 0 {
+			t.Fatalf("different-host JWKS redirect requests = %d, want 0", requests)
+		}
+	})
+}
+
+func TestSameOriginRequiresMatchingSchemeHostAndPort(t *testing.T) {
+	issuer := parseTestURL(t, "https://issuer.example.test/tenant")
+	tests := []struct {
+		name      string
+		candidate string
+		want      bool
+	}{
+		{name: "same origin", candidate: "https://issuer.example.test/keys", want: true},
+		{name: "implicit default port", candidate: "https://issuer.example.test:443/keys", want: true},
+		{name: "scheme downgrade", candidate: "http://issuer.example.test/keys"},
+		{name: "different host", candidate: "https://keys.example.test/keys"},
+		{name: "different port", candidate: "https://issuer.example.test:8443/keys"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sameOrigin(issuer, parseTestURL(t, test.candidate)); got != test.want {
+				t.Fatalf("sameOrigin() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNewOIDCVerifierAllowsLoopbackHTTPIssuer(t *testing.T) {
+	provider := newLoopbackTestOIDCProvider(t)
+	key := generateRSAKey(t)
+	provider.setKeys(map[string]*rsa.PublicKey{"loopback": &key.PublicKey})
+	verifier := provider.newVerifier(t)
+	token := signTestJWT(t, key, nil, "loopback", oidc.RS256, map[string]any{
+		"iss":       provider.server.URL,
+		"aud":       "bridge-a2a",
+		"sub":       "user-1",
+		"tenant_id": "tenant-1",
+		"exp":       time.Now().Add(10 * time.Minute).Unix(),
+	})
+	if _, err := verifier.Verify(context.Background(), token); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
 }
 
 func TestValidateOIDCConfigRejectsUnsafeInputs(t *testing.T) {
@@ -283,20 +423,30 @@ func TestValidateOIDCConfigRejectsUnsafeInputs(t *testing.T) {
 }
 
 type testOIDCProvider struct {
-	t              *testing.T
-	server         *httptest.Server
-	mu             sync.Mutex
-	keys           map[string]*rsa.PublicKey
-	online         bool
-	keyRequests    int
-	issuerOverride string
-	jwksOverride   string
+	t                 *testing.T
+	server            *httptest.Server
+	mu                sync.Mutex
+	keys              map[string]*rsa.PublicKey
+	online            bool
+	keyRequests       int
+	issuerOverride    string
+	jwksOverride      string
+	discoveryRedirect string
+	jwksRedirect      string
 }
 
 func newTestOIDCProvider(t *testing.T) *testOIDCProvider {
 	t.Helper()
 	provider := &testOIDCProvider{t: t, online: true, keys: make(map[string]*rsa.PublicKey)}
 	provider.server = httptest.NewTLSServer(http.HandlerFunc(provider.serveHTTP))
+	t.Cleanup(provider.server.Close)
+	return provider
+}
+
+func newLoopbackTestOIDCProvider(t *testing.T) *testOIDCProvider {
+	t.Helper()
+	provider := &testOIDCProvider{t: t, online: true, keys: make(map[string]*rsa.PublicKey)}
+	provider.server = httptest.NewServer(http.HandlerFunc(provider.serveHTTP))
 	t.Cleanup(provider.server.Close)
 	return provider
 }
@@ -309,6 +459,7 @@ func (p *testOIDCProvider) config() config.OIDCConfig {
 		AllowedAlgorithms: []string{oidc.RS256},
 		ClockSkew:         time.Minute,
 		HTTPTimeout:       2 * time.Second,
+		AllowPrivateIPs:   true,
 	}
 }
 
@@ -325,26 +476,19 @@ func (p *testOIDCProvider) serveHTTP(response http.ResponseWriter, request *http
 	switch request.URL.Path {
 	case "/.well-known/openid-configuration":
 		p.mu.Lock()
-		issuer := p.issuerOverride
-		jwksURL := p.jwksOverride
+		redirect := p.discoveryRedirect
 		p.mu.Unlock()
-		if issuer == "" {
-			issuer = p.server.URL
+		if redirect != "" {
+			http.Redirect(response, request, redirect, http.StatusFound)
+			return
 		}
-		if jwksURL == "" {
-			jwksURL = p.server.URL + "/jwks"
-		}
-		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(map[string]any{
-			"issuer":                                issuer,
-			"authorization_endpoint":                p.server.URL + "/authorize",
-			"token_endpoint":                        p.server.URL + "/token",
-			"jwks_uri":                              jwksURL,
-			"id_token_signing_alg_values_supported": []string{oidc.RS256},
-		})
+		p.writeDiscovery(response)
+	case "/redirected/openid-configuration":
+		p.writeDiscovery(response)
 	case "/jwks":
 		p.mu.Lock()
 		p.keyRequests++
+		redirect := p.jwksRedirect
 		online := p.online
 		keyIDs := make([]string, 0, len(p.keys))
 		for keyID := range p.keys {
@@ -357,14 +501,43 @@ func (p *testOIDCProvider) serveHTTP(response http.ResponseWriter, request *http
 			keys = append(keys, rsaJWK(keyID, key))
 		}
 		p.mu.Unlock()
+		if redirect != "" {
+			http.Redirect(response, request, redirect, http.StatusFound)
+			return
+		}
 		if !online {
 			http.Error(response, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(map[string]any{"keys": keys})
+		if err := json.NewEncoder(response).Encode(map[string]any{"keys": keys}); err != nil {
+			p.t.Errorf("encode JWKS response: %v", err)
+		}
 	default:
 		http.NotFound(response, request)
+	}
+}
+
+func (p *testOIDCProvider) writeDiscovery(response http.ResponseWriter) {
+	p.mu.Lock()
+	issuer := p.issuerOverride
+	jwksURL := p.jwksOverride
+	p.mu.Unlock()
+	if issuer == "" {
+		issuer = p.server.URL
+	}
+	if jwksURL == "" {
+		jwksURL = p.server.URL + "/jwks"
+	}
+	response.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(response).Encode(map[string]any{
+		"issuer":                                issuer,
+		"authorization_endpoint":                p.server.URL + "/authorize",
+		"token_endpoint":                        p.server.URL + "/token",
+		"jwks_uri":                              jwksURL,
+		"id_token_signing_alg_values_supported": []string{oidc.RS256},
+	}); err != nil {
+		p.t.Errorf("encode discovery response: %v", err)
 	}
 }
 
@@ -392,10 +565,38 @@ func (p *testOIDCProvider) setJWKSOverride(jwksURL string) {
 	p.jwksOverride = jwksURL
 }
 
+func (p *testOIDCProvider) setDiscoveryRedirect(redirect string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.discoveryRedirect = redirect
+}
+
+func (p *testOIDCProvider) setJWKSRedirect(redirect string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.jwksRedirect = redirect
+}
+
 func (p *testOIDCProvider) keyRequestCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.keyRequests
+}
+
+func parseTestURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse URL %q: %v", rawURL, err)
+	}
+	return parsed
+}
+
+func urlWithHostname(t *testing.T, rawURL, hostname string) string {
+	t.Helper()
+	parsed := parseTestURL(t, rawURL)
+	parsed.Host = hostname + ":" + parsed.Port()
+	return parsed.String()
 }
 
 func generateRSAKey(t *testing.T) *rsa.PrivateKey {

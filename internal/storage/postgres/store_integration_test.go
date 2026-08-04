@@ -157,7 +157,7 @@ func TestPostgresStoreConcurrentVersions(t *testing.T) {
 	var wg sync.WaitGroup
 	errorsOut := make(chan error, contenders)
 	versions := make(chan taskstore.TaskVersion, contenders)
-	for i := range contenders {
+	for i := 0; i < contenders; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -281,7 +281,7 @@ func TestPostgresStoreA2AHTTPIdentityPropagation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sendResponse.Body.Close()
+	defer func() { _ = sendResponse.Body.Close() }()
 	if sendResponse.StatusCode != http.StatusOK {
 		t.Fatalf("send status = %d", sendResponse.StatusCode)
 	}
@@ -311,7 +311,7 @@ func TestPostgresStoreA2AHTTPIdentityPropagation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response.Body.Close()
+		_ = response.Body.Close()
 		if response.StatusCode != test.status {
 			t.Fatalf("GET with %s status = %d, want %d", test.token, response.StatusCode, test.status)
 		}
@@ -321,7 +321,7 @@ func TestPostgresStoreA2AHTTPIdentityPropagation(t *testing.T) {
 type httpTestVerifier struct{}
 
 func (httpTestVerifier) Verify(_ context.Context, token string) (appauth.Identity, error) {
-	tenant := ""
+	var tenant string
 	switch token {
 	case "tenant-a-token":
 		tenant = "tenant-a"

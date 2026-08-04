@@ -32,7 +32,7 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	if cfg.Environment != "development" && cfg.Environment != "test" {
-		return fmt.Errorf("Redpanda dispatcher is not configured for %s", cfg.Environment)
+		return fmt.Errorf("redpanda dispatcher is not configured for %s", cfg.Environment)
 	}
 
 	shutdownSignals, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -24,15 +25,7 @@ type OIDCVerifier struct {
 }
 
 func NewOIDCVerifier(ctx context.Context, cfg config.OIDCConfig) (*OIDCVerifier, error) {
-	issuerURL, err := validateOIDCConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	httpClient := &http.Client{
-		Timeout:       cfg.HTTPTimeout,
-		CheckRedirect: oidcRedirectPolicy(issuerURL.Scheme == "http"),
-	}
-	return newOIDCVerifier(ctx, cfg, httpClient)
+	return newOIDCVerifier(ctx, cfg, http.DefaultClient)
 }
 
 func newOIDCVerifier(ctx context.Context, cfg config.OIDCConfig, sourceClient *http.Client) (*OIDCVerifier, error) {
@@ -43,10 +36,12 @@ func newOIDCVerifier(ctx context.Context, cfg config.OIDCConfig, sourceClient *h
 	if sourceClient == nil {
 		return nil, fmt.Errorf("OIDC HTTP client is required")
 	}
-	httpClient := *sourceClient
-	httpClient.Timeout = cfg.HTTPTimeout
-	httpClient.CheckRedirect = oidcRedirectPolicy(issuerURL.Scheme == "http")
-	providerContext := oidc.ClientContext(ctx, &httpClient)
+	httpClient, err := secureOIDCHTTPClient(sourceClient, cfg)
+	if err != nil {
+		return nil, err
+	}
+	httpClient.CheckRedirect = oidcRedirectPolicy(issuerURL)
+	providerContext := oidc.ClientContext(ctx, httpClient)
 	provider, err := oidc.NewProvider(providerContext, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discover OIDC provider: %w", err)
@@ -58,8 +53,12 @@ func newOIDCVerifier(ctx context.Context, cfg config.OIDCConfig, sourceClient *h
 		return nil, fmt.Errorf("decode OIDC provider metadata: %w", err)
 	}
 	allowLoopbackHTTP := issuerURL.Scheme == "http"
-	if _, err := validateRemoteURL(metadata.JWKSURL, allowLoopbackHTTP, true); err != nil {
+	jwksURL, err := validateRemoteURL(metadata.JWKSURL, allowLoopbackHTTP, true)
+	if err != nil {
 		return nil, fmt.Errorf("unsafe OIDC jwks_uri: %w", err)
+	}
+	if !sameOrigin(issuerURL, jwksURL) {
+		return nil, fmt.Errorf("unsafe OIDC jwks_uri: must use the configured issuer origin")
 	}
 	verifier := provider.VerifierContext(providerContext, &oidc.Config{
 		ClientID:             cfg.Audience,
@@ -100,14 +99,9 @@ func validateOIDCConfig(cfg config.OIDCConfig) (*url.URL, error) {
 	if len(cfg.AllowedAlgorithms) == 0 {
 		return nil, fmt.Errorf("at least one OIDC signing algorithm is required")
 	}
-	allowed := map[string]bool{
-		oidc.RS256: true, oidc.RS384: true, oidc.RS512: true,
-		oidc.PS256: true, oidc.PS384: true, oidc.PS512: true,
-		oidc.ES256: true, oidc.ES384: true, oidc.ES512: true,
-	}
 	seen := make(map[string]bool, len(cfg.AllowedAlgorithms))
 	for _, algorithm := range cfg.AllowedAlgorithms {
-		if !allowed[algorithm] || seen[algorithm] {
+		if !config.AllowedOIDCAlgorithm(algorithm) || seen[algorithm] {
 			return nil, fmt.Errorf("unsafe, unsupported, or duplicate OIDC signing algorithm %q", algorithm)
 		}
 		seen[algorithm] = true
@@ -143,13 +137,110 @@ func isLoopbackHost(host string) bool {
 	return address != nil && address.IsLoopback()
 }
 
-func oidcRedirectPolicy(allowLoopbackHTTP bool) func(*http.Request, []*http.Request) error {
+func secureOIDCHTTPClient(source *http.Client, cfg config.OIDCConfig) (*http.Client, error) {
+	client := *source
+	client.Timeout = cfg.HTTPTimeout
+	if cfg.AllowPrivateIPs {
+		return &client, nil
+	}
+
+	var transport *http.Transport
+	switch current := source.Transport.(type) {
+	case nil:
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	case *http.Transport:
+		transport = current.Clone()
+	default:
+		return nil, fmt.Errorf("OIDC HTTP transport must support protected dialing")
+	}
+	// Resolve and connect in one policy-controlled dial function so DNS cannot
+	// redirect a production OIDC request to private or special-use networks.
+	transport.Proxy = nil
+	transport.DialContext = dialPublicOIDCAddress
+	client.Transport = transport
+	return &client, nil
+}
+
+func dialPublicOIDCAddress(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("parse OIDC destination: %w", err)
+	}
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve OIDC destination: %w", err)
+	}
+	var lastErr error
+	for _, candidate := range addresses {
+		if !publicOIDCAddress(candidate) {
+			continue
+		}
+		connection, dialErr := (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+		if dialErr == nil {
+			return connection, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("connect to public OIDC destination: %w", lastErr)
+	}
+	return nil, fmt.Errorf("OIDC destination resolved only to private or special-use addresses")
+}
+
+var nonPublicOIDCPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+func publicOIDCAddress(address netip.Addr) bool {
+	parsed := address.Unmap()
+	if !parsed.IsGlobalUnicast() || parsed.IsPrivate() || parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsMulticast() || parsed.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range nonPublicOIDCPrefixes {
+		if prefix.Contains(parsed) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameOrigin(expected, candidate *url.URL) bool {
+	return strings.EqualFold(expected.Scheme, candidate.Scheme) &&
+		strings.EqualFold(expected.Hostname(), candidate.Hostname()) &&
+		effectivePort(expected) == effectivePort(candidate)
+}
+
+func effectivePort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func oidcRedirectPolicy(issuerURL *url.URL) func(*http.Request, []*http.Request) error {
 	return func(request *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return fmt.Errorf("too many OIDC redirects")
 		}
-		if _, err := validateRemoteURL(request.URL.String(), allowLoopbackHTTP, true); err != nil {
+		candidate, err := validateRemoteURL(request.URL.String(), issuerURL.Scheme == "http", true)
+		if err != nil {
 			return fmt.Errorf("unsafe OIDC redirect: %w", err)
+		}
+		if !sameOrigin(issuerURL, candidate) {
+			return fmt.Errorf("unsafe OIDC redirect: must use the configured issuer origin")
 		}
 		return nil
 	}

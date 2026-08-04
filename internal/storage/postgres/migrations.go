@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -49,7 +50,7 @@ func CurrentSchemaVersion() int64 {
 
 // Migrate applies all pending forward-only migrations while holding a
 // PostgreSQL session advisory lock. Applied migration checksums are immutable.
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+func Migrate(ctx context.Context, pool *pgxpool.Pool) (resultErr error) {
 	if pool == nil {
 		return fmt.Errorf("PostgreSQL pool is required")
 	}
@@ -62,12 +63,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer conn.Release()
-
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+		destroyMigrationConnection(conn)
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
-	defer releaseMigrationLock(conn)
+	defer func() {
+		if err := releaseMigrationLock(conn); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
 
 	if _, err := conn.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS a2a_schema_migrations (
@@ -100,7 +104,7 @@ CREATE TABLE IF NOT EXISTS a2a_schema_migrations (
 
 // VerifySchema verifies that every embedded migration, and no unknown
 // migration, is recorded with its original checksum.
-func VerifySchema(ctx context.Context, pool *pgxpool.Pool) error {
+func VerifySchema(ctx context.Context, pool *pgxpool.Pool) (resultErr error) {
 	if pool == nil {
 		return fmt.Errorf("PostgreSQL pool is required")
 	}
@@ -109,14 +113,28 @@ func VerifySchema(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire schema verification connection: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+		destroyMigrationConnection(conn)
+		return fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		if err := releaseMigrationLock(conn); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+
 	var ledgerName *string
-	if err := pool.QueryRow(ctx, "SELECT to_regclass(current_schema() || '.' || $1)::text", migrationTable).Scan(&ledgerName); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT to_regclass(current_schema() || '.' || $1)::text", migrationTable).Scan(&ledgerName); err != nil {
 		return fmt.Errorf("locate migration ledger: %w", err)
 	}
 	if ledgerName == nil {
 		return fmt.Errorf("database schema is not initialized")
 	}
-	applied, err := loadAppliedMigrations(ctx, pool)
+	applied, err := loadAppliedMigrations(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -247,8 +265,25 @@ func applyMigration(ctx context.Context, conn *pgxpool.Conn, item migration) err
 	return nil
 }
 
-func releaseMigrationLock(conn *pgxpool.Conn) {
+func releaseMigrationLock(conn *pgxpool.Conn) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockID)
+	var unlocked bool
+	if err := conn.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", migrationLockID).Scan(&unlocked); err != nil {
+		destroyMigrationConnection(conn)
+		return fmt.Errorf("release migration advisory lock: %w", err)
+	}
+	if !unlocked {
+		destroyMigrationConnection(conn)
+		return fmt.Errorf("release migration advisory lock: lock was not held")
+	}
+	conn.Release()
+	return nil
+}
+
+func destroyMigrationConnection(conn *pgxpool.Conn) {
+	raw := conn.Hijack()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = raw.Close(ctx)
 }

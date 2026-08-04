@@ -31,7 +31,9 @@ running the binary directly, export overrides in the shell environment.
 
 Set `OIDC_ISSUER`, `OIDC_AUDIENCE`, and `DATABASE_URL` to exercise the durable,
 authenticated path. Credentials are read from mounted files such as
-`DATABASE_PASSWORD_FILE`; passwords embedded in `DATABASE_URL` are rejected.
+`DATABASE_PASSWORD_FILE`; passwords, passfiles, service files, and password
+environment variables outside that explicit path are rejected. OIDC policy
+variables without a complete issuer/audience pair also fail startup.
 Apply schema migrations separately before starting the server:
 
 ```powershell

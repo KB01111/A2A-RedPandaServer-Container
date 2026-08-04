@@ -45,6 +45,12 @@ set. An identity-provider outage therefore does not make liveness dependent on
 a network call for every request, although a previously unseen signing key
 still fails closed while the key endpoint is unavailable.
 
+Discovery redirects and the discovered JWKS endpoint must remain on the exact
+issuer origin (scheme, host, and effective port). In staging and production the
+OIDC dialer also rejects private, loopback, link-local, and special-use IP
+destinations at connection time. Cleartext loopback issuers and private
+destinations are enabled only for development and test environments.
+
 ## PostgreSQL task ownership
 
 The PostgreSQL adapter implements the SDK's `taskstore.Store` contract without
@@ -62,7 +68,10 @@ repeatable-read snapshot and opaque keyset cursors.
 Schema changes are forward-only, checksummed, and protected by a PostgreSQL
 advisory lock. `cmd/migrate` owns DDL. The server only verifies that the schema
 is current and fails startup when it is behind; production deployments should
-use separate migration and runtime database roles.
+use separate migration and runtime database roles and must not run migrations
+concurrently with application processes. Database passwords are accepted only
+through the explicit bounded secret file; URI parameters and PostgreSQL
+password/service environment fallbacks are rejected.
 
 ## Runtime boundary
 

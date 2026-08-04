@@ -51,7 +51,7 @@ func TestMiddlewareAuthenticatesAndRemovesCredentials(t *testing.T) {
 		response.WriteHeader(http.StatusNoContent)
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "/message:send", strings.NewReader("body"))
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/message:send", strings.NewReader("body"))
 	request.Header.Set("Authorization", "Bearer good-token")
 	request.Header.Set("Proxy-Authorization", "Basic secret")
 	request.Header.Set("Cookie", "session=secret")
@@ -87,7 +87,7 @@ func TestMiddlewareRejectsInvalidCredentialsWithoutCallingNext(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			called := false
 			handler := authenticator.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-			request := httptest.NewRequest(http.MethodPost, "/message:send", nil)
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/message:send", nil)
 			for _, value := range test.headers {
 				request.Header.Add("Authorization", value)
 			}
@@ -110,14 +110,23 @@ func TestMiddlewareRejectsMissingScope(t *testing.T) {
 	authenticator := testAuthenticator(t, func(context.Context, string) (Identity, error) {
 		return Identity{Issuer: "https://issuer.example.test/", Subject: "user", Tenant: "tenant", Scopes: []string{"profile"}}, nil
 	})
-	request := httptest.NewRequest(http.MethodPost, "/message:send", nil)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/message:send", nil)
 	request.Header.Set("Authorization", "Bearer token")
 	response := httptest.NewRecorder()
 	authenticator.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("protected handler was called")
 	})).ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden || response.Header().Get("WWW-Authenticate") != "" {
+	challenge := response.Header().Get("WWW-Authenticate")
+	if response.Code != http.StatusForbidden || !strings.Contains(challenge, `error="insufficient_scope"`) || !strings.Contains(challenge, `scope="a2a"`) {
 		t.Fatalf("response = %d, headers = %#v", response.Code, response.Header())
+	}
+}
+
+func TestNewAuthenticatorRejectsInvalidScopeToken(t *testing.T) {
+	if _, err := NewAuthenticator(verifierFunc(func(context.Context, string) (Identity, error) {
+		return Identity{}, nil
+	}), "https://issuer.example.test", []string{`a2a"bad`}); err == nil {
+		t.Fatal("NewAuthenticator() error = nil, want invalid scope error")
 	}
 }
 
@@ -130,7 +139,7 @@ func TestMiddlewareRejectsMismatchedVerifiedIssuer(t *testing.T) {
 			Scopes:  []string{"a2a"},
 		}, nil
 	})
-	request := httptest.NewRequest(http.MethodPost, "/message:send", nil)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/message:send", nil)
 	request.Header.Set("Authorization", "Bearer token")
 	response := httptest.NewRecorder()
 	authenticator.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

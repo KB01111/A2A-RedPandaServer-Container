@@ -192,7 +192,7 @@ func TestNormalizeExtensions(t *testing.T) {
 		got = request.Header.Values(a2a.SvcParamExtensions)
 		response.WriteHeader(http.StatusNoContent)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/?A2A-Extensions=https%3A%2F%2Ffour.example", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/?A2A-Extensions=https%3A%2F%2Ffour.example", nil)
 	req.Header.Add(a2a.SvcParamExtensions, "https://one.example, https://two.example")
 	req.Header.Add(a2a.SvcParamExtensions, "https://three.example")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
@@ -235,7 +235,11 @@ func TestProductionRequiresAuthentication(t *testing.T) {
 func TestAuthenticatedServerKeepsAgentCardPublicAndProtectsA2A(t *testing.T) {
 	testServer := newAuthenticatedTestServer(t)
 
-	cardResponse, err := testServer.Client().Get(testServer.URL + "/.well-known/agent-card.json")
+	cardRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, testServer.URL+"/.well-known/agent-card.json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardResponse, err := testServer.Client().Do(cardRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
