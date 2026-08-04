@@ -214,7 +214,7 @@ func TestIdentityInterceptorInjectsTenantIntoEveryRequestType(t *testing.T) {
 
 func TestOwnerKeyIsStableAndUnambiguous(t *testing.T) {
 	identity := Identity{Issuer: "https://issuer", Tenant: "tenant", Subject: "subject"}
-	if first, second := ownerKey(identity), ownerKey(identity); first != second {
+	if first, second := OwnerKey(identity), OwnerKey(identity); first != second {
 		t.Fatalf("owner key is unstable: %q != %q", first, second)
 	}
 	identities := []Identity{
@@ -225,7 +225,7 @@ func TestOwnerKeyIsStableAndUnambiguous(t *testing.T) {
 	}
 	seen := make(map[string]bool, len(identities))
 	for _, candidate := range identities {
-		key := ownerKey(candidate)
+		key := OwnerKey(candidate)
 		if seen[key] {
 			t.Fatalf("owner key collision for %#v: %q", candidate, key)
 		}

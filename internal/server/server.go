@@ -63,6 +63,7 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 	if dependencies.Authentication != nil {
 		interceptors = append(interceptors, dependencies.Authentication.CallInterceptor())
 	}
+	interceptors = append(interceptors, errorBoundaryInterceptor{logger: dependencies.Logger})
 	requestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithTaskStore(dependencies.TaskStore),

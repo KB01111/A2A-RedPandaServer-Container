@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -285,6 +286,44 @@ func TestAuthenticationRunsBeforeRequestBodyBuffering(t *testing.T) {
 	}
 }
 
+func TestBackendErrorsAreNotExposedOnRESTWire(t *testing.T) {
+	authenticator, err := auth.NewAuthenticator(testVerifier{}, "https://issuer.example.test", []string{"a2a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(newTestConfig(t), Dependencies{
+		Dispatcher:     orchestrator.LoopbackDispatcher{},
+		TaskStore:      failingTaskStore{},
+		Authentication: authenticator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, testServer.URL+"/tasks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(a2a.SvcParamVersion, string(a2a.Version))
+	request.Header.Set("Authorization", "Bearer valid")
+	response, err := testServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, response.Body)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", response.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte("db.internal")) || bytes.Contains(body, []byte("a2a_tasks")) || !bytes.Contains(body, []byte("internal error")) {
+		t.Fatalf("unsafe backend error body = %s", body)
+	}
+}
+
 func newTestServer(t *testing.T) *httptest.Server {
 	return newTestServerWithMaxBody(t, 1<<20)
 }
@@ -314,6 +353,24 @@ func (testVerifier) Verify(_ context.Context, token string) (auth.Identity, erro
 		Tenant:  "tenant-1",
 		Scopes:  []string{"a2a"},
 	}, nil
+}
+
+type failingTaskStore struct{}
+
+func (failingTaskStore) Create(context.Context, *a2a.Task) (taskstore.TaskVersion, error) {
+	return taskstore.TaskVersionMissing, errors.New("postgres db.internal relation a2a_tasks")
+}
+
+func (failingTaskStore) Update(context.Context, *taskstore.UpdateRequest) (taskstore.TaskVersion, error) {
+	return taskstore.TaskVersionMissing, errors.New("postgres db.internal relation a2a_tasks")
+}
+
+func (failingTaskStore) Get(context.Context, a2a.TaskID) (*taskstore.StoredTask, error) {
+	return nil, errors.New("postgres db.internal relation a2a_tasks")
+}
+
+func (failingTaskStore) List(context.Context, *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
+	return nil, errors.New("postgres db.internal relation a2a_tasks")
 }
 
 func newAuthenticatedTestServer(t *testing.T) *httptest.Server {

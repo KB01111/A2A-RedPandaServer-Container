@@ -112,7 +112,7 @@ func (identityInterceptor) Before(
 		return ctx, nil, a2a.ErrUnauthorized
 	}
 	setRequestTenant(request.Payload, identity.Tenant)
-	callCtx.User = a2asrv.NewAuthenticatedUser(ownerKey(identity), map[string]any{
+	callCtx.User = a2asrv.NewAuthenticatedUser(OwnerKey(identity), map[string]any{
 		"issuer":  identity.Issuer,
 		"subject": identity.Subject,
 		"tenant":  identity.Tenant,
@@ -121,7 +121,9 @@ func (identityInterceptor) Before(
 	return ctx, nil, nil
 }
 
-func ownerKey(identity Identity) string {
+// OwnerKey returns an unambiguous stable identity key for SDK components whose
+// ownership contract exposes only one string.
+func OwnerKey(identity Identity) string {
 	return fmt.Sprintf("%d:%s|%d:%s|%d:%s", len(identity.Issuer), identity.Issuer, len(identity.Tenant), identity.Tenant, len(identity.Subject), identity.Subject)
 }
 

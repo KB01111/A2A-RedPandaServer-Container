@@ -54,13 +54,13 @@ func (s *Store) Create(ctx context.Context, task *a2a.Task) (taskstore.TaskVersi
 	var version int64
 	err = s.pool.QueryRow(ctx, `
 INSERT INTO a2a_tasks (
-    task_id, tenant_id, owner_subject, context_id, state,
-    status_timestamp, task_json, version
+    task_id, tenant_id, owner_issuer, owner_subject, context_id,
+    state, status_timestamp, task_json, version
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 1)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 1)
 ON CONFLICT (task_id) DO NOTHING
 RETURNING version`,
-		string(task.ID), identity.Tenant, identity.Subject, task.ContextID,
+		string(task.ID), identity.Tenant, identity.Issuer, identity.Subject, task.ContextID,
 		string(task.Status.State), task.Status.Timestamp, string(payload),
 	).Scan(&version)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -92,8 +92,8 @@ func (s *Store) Update(ctx context.Context, request *taskstore.UpdateRequest) (t
 		err := tx.QueryRow(ctx, `
 SELECT version
 FROM a2a_tasks
-WHERE task_id = $1 AND tenant_id = $2 AND owner_subject = $3
-FOR UPDATE`, string(request.Task.ID), identity.Tenant, identity.Subject).Scan(&storedVersion)
+WHERE task_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4
+FOR UPDATE`, string(request.Task.ID), identity.Tenant, identity.Issuer, identity.Subject).Scan(&storedVersion)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return a2a.ErrTaskNotFound
 		}
@@ -107,15 +107,15 @@ FOR UPDATE`, string(request.Task.ID), identity.Tenant, identity.Subject).Scan(&s
 		var version int64
 		if err := tx.QueryRow(ctx, `
 UPDATE a2a_tasks
-SET context_id = $4,
-    state = $5,
-    status_timestamp = $6,
-    task_json = $7::jsonb,
+SET context_id = $5,
+    state = $6,
+    status_timestamp = $7,
+    task_json = $8::jsonb,
     version = version + 1,
     updated_at = clock_timestamp()
-WHERE task_id = $1 AND tenant_id = $2 AND owner_subject = $3
+WHERE task_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4
 RETURNING version`,
-			string(request.Task.ID), identity.Tenant, identity.Subject,
+			string(request.Task.ID), identity.Tenant, identity.Issuer, identity.Subject,
 			request.Task.ContextID, string(request.Task.Status.State),
 			request.Task.Status.Timestamp, string(payload),
 		).Scan(&version); err != nil {
@@ -142,13 +142,12 @@ func (s *Store) Get(ctx context.Context, taskID a2a.TaskID) (*taskstore.StoredTa
 
 	var payload []byte
 	var version int64
-	var owner string
 	err = s.pool.QueryRow(ctx, `
-SELECT task_json, version, owner_subject
+SELECT task_json, version
 FROM a2a_tasks
-WHERE task_id = $1 AND tenant_id = $2 AND owner_subject = $3`,
-		string(taskID), identity.Tenant, identity.Subject,
-	).Scan(&payload, &version, &owner)
+WHERE task_id = $1 AND tenant_id = $2 AND owner_issuer = $3 AND owner_subject = $4`,
+		string(taskID), identity.Tenant, identity.Issuer, identity.Subject,
+	).Scan(&payload, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, a2a.ErrTaskNotFound
 	}
@@ -162,7 +161,7 @@ WHERE task_id = $1 AND tenant_id = $2 AND owner_subject = $3`,
 	return &taskstore.StoredTask{
 		Task:    task,
 		Version: taskstore.TaskVersion(version),
-		User:    owner,
+		User:    appauth.OwnerKey(identity),
 	}, nil
 }
 
@@ -272,7 +271,7 @@ LIMIT $%d`, len(pageArgs))
 
 func verifiedIdentity(ctx context.Context) (appauth.Identity, error) {
 	identity, ok := appauth.IdentityFromContext(ctx)
-	if !ok || strings.TrimSpace(identity.Tenant) == "" || strings.TrimSpace(identity.Subject) == "" {
+	if !ok || strings.TrimSpace(identity.Issuer) == "" || strings.TrimSpace(identity.Tenant) == "" || strings.TrimSpace(identity.Subject) == "" {
 		return appauth.Identity{}, a2a.ErrUnauthenticated
 	}
 	return identity, nil
@@ -296,8 +295,8 @@ func unmarshalTask(payload []byte) (*a2a.Task, error) {
 
 func listFilter(identity appauth.Identity, request *a2a.ListTasksRequest) (string, []any) {
 	var builder strings.Builder
-	builder.WriteString("WHERE tenant_id = $1 AND owner_subject = $2")
-	args := []any{identity.Tenant, identity.Subject}
+	builder.WriteString("WHERE tenant_id = $1 AND owner_issuer = $2 AND owner_subject = $3")
+	args := []any{identity.Tenant, identity.Issuer, identity.Subject}
 	if request.ContextID != "" {
 		args = append(args, request.ContextID)
 		fmt.Fprintf(&builder, " AND context_id = $%d", len(args))

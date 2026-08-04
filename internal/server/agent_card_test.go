@@ -118,3 +118,45 @@ func TestLoadAgentCardRejectsUnconfiguredExtensionsAndSecurity(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAgentCardRejectsUnenforcedSkillSecurityAndStaleSignatures(t *testing.T) {
+	tests := []struct {
+		name       string
+		skillExtra string
+		topLevel   string
+		want       string
+	}{
+		{
+			name:       "skill security",
+			skillExtra: `,"securityRequirements":[{"schemes":{"oidc":["a2a"]}}]`,
+			want:       "skill 0 advertises security",
+		},
+		{
+			name:     "signature",
+			topLevel: `,"signatures":[{"protected":"e30","signature":"invalid-after-rewrite"}]`,
+			want:     "signatures cannot be retained",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "card.json")
+			card := `{
+  "capabilities":{"streaming":true},
+  "defaultInputModes":["text/plain"],
+  "defaultOutputModes":["text/plain"],
+  "description":"test",
+  "name":"test",
+  "skills":[{"description":"test","id":"test","name":"test","tags":["test"]` + test.skillExtra + `}],
+  "supportedInterfaces":[{"url":"https://example.com","protocolBinding":"HTTP+JSON","protocolVersion":"1.0"}],
+  "version":"1"` + test.topLevel + `
+}`
+			if err := os.WriteFile(path, []byte(card), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadAgentCard(path, "https://a2a.example.com")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("loadAgentCard() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}

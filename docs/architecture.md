@@ -48,11 +48,11 @@ still fails closed while the key endpoint is unavailable.
 ## PostgreSQL task ownership
 
 The PostgreSQL adapter implements the SDK's `taskstore.Store` contract without
-changing A2A wire behavior. Every read and write is scoped by both the verified
-tenant and subject from `context.Context`; request JSON is never an authority
-source. Cross-scope lookups return not-found so they cannot be used as an
-existence oracle. Task IDs remain globally unique because the SDK's in-process
-event, work, and push stores are keyed only by task ID.
+changing A2A wire behavior. Every read and write is scoped by the verified OIDC
+issuer, tenant, and subject from `context.Context`; request JSON is never an
+authority source. Cross-scope lookups return not-found so they cannot be used
+as an existence oracle. Task IDs remain globally unique because the SDK's
+in-process event, work, and push stores are keyed only by task ID.
 
 The full canonical task is stored as JSONB with indexed projections for tenant,
 owner, context, state, status time, and update time. Updates use row locking and

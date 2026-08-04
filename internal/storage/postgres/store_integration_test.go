@@ -31,6 +31,7 @@ func TestPostgresStoreCRUDIsolationAndCAS(t *testing.T) {
 	alice := identityContext("tenant-a", "alice")
 	bob := identityContext("tenant-a", "bob")
 	otherTenant := identityContext("tenant-b", "alice")
+	otherIssuer := identityContextWithIssuer("https://new-issuer.example.test", "tenant-a", "alice")
 	task := &a2a.Task{
 		ID:        "crud-task",
 		ContextID: "context-1",
@@ -46,7 +47,7 @@ func TestPostgresStoreCRUDIsolationAndCAS(t *testing.T) {
 	if _, err := store.Create(bob, task); !errors.Is(err, taskstore.ErrTaskAlreadyExists) {
 		t.Fatalf("duplicate Create() error = %v", err)
 	}
-	for name, ctx := range map[string]context.Context{"different owner": bob, "different tenant": otherTenant} {
+	for name, ctx := range map[string]context.Context{"different owner": bob, "different tenant": otherTenant, "different issuer": otherIssuer} {
 		if _, err := store.Get(ctx, task.ID); !errors.Is(err, a2a.ErrTaskNotFound) {
 			t.Errorf("%s Get() error = %v", name, err)
 		}
@@ -71,7 +72,8 @@ func TestPostgresStoreCRUDIsolationAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if stored.Version != 2 || stored.User != "alice" || stored.Task.ContextID != "context-2" || len(stored.Task.Artifacts) != 1 {
+	wantOwner := appauth.OwnerKey(appauth.Identity{Issuer: "https://issuer.example.test", Tenant: "tenant-a", Subject: "alice"})
+	if stored.Version != 2 || stored.User != wantOwner || stored.Task.ContextID != "context-2" || len(stored.Task.Artifacts) != 1 {
 		t.Fatalf("stored task = %#v", stored)
 	}
 }
@@ -401,8 +403,12 @@ func newIntegrationStore(t *testing.T) (*Store, *pgxpool.Pool) {
 }
 
 func identityContext(tenant, subject string) context.Context {
+	return identityContextWithIssuer("https://issuer.example.test", tenant, subject)
+}
+
+func identityContextWithIssuer(issuer, tenant, subject string) context.Context {
 	return appauth.WithIdentity(context.Background(), appauth.Identity{
-		Issuer:  "https://issuer.example.test",
+		Issuer:  issuer,
 		Tenant:  tenant,
 		Subject: subject,
 	})
