@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/KB01111/A2A-RedPandaServer-Container/internal/auth"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/config"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/orchestrator"
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -15,9 +16,10 @@ import (
 )
 
 type Dependencies struct {
-	Dispatcher orchestrator.Dispatcher
-	TaskStore  taskstore.Store
-	Logger     *slog.Logger
+	Dispatcher     orchestrator.Dispatcher
+	TaskStore      taskstore.Store
+	Logger         *slog.Logger
+	Authentication *auth.Authenticator
 }
 
 func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
@@ -45,15 +47,27 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 		if cfg.Environment != "development" && cfg.Environment != "test" {
 			return nil, fmt.Errorf("task store is required in %s", cfg.Environment)
 		}
-		dependencies.TaskStore = taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
-			Authenticator: func(context.Context) (string, error) { return "anonymous", nil },
-		})
+		authenticator := taskstore.Authenticator(func(context.Context) (string, error) { return "anonymous", nil })
+		if dependencies.Authentication != nil {
+			authenticator = a2asrv.NewTaskStoreAuthenticator()
+		}
+		dependencies.TaskStore = taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{Authenticator: authenticator})
+	}
+	if dependencies.Authentication == nil && cfg.Environment != "development" && cfg.Environment != "test" {
+		return nil, fmt.Errorf("authentication is required in %s", cfg.Environment)
+	}
+	if dependencies.Authentication != nil {
+		dependencies.Authentication.ConfigureAgentCard(card)
+	}
+	interceptors := []a2asrv.CallInterceptor{protocolVersionInterceptor{}}
+	if dependencies.Authentication != nil {
+		interceptors = append(interceptors, dependencies.Authentication.CallInterceptor())
 	}
 	requestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithTaskStore(dependencies.TaskStore),
 		a2asrv.WithCapabilityChecks(&card.Capabilities),
-		a2asrv.WithCallInterceptors(protocolVersionInterceptor{}),
+		a2asrv.WithCallInterceptors(interceptors...),
 		a2asrv.WithAgentInactivityTimeout(cfg.AgentInactivity),
 		a2asrv.WithExecutionPanicHandler(func(recovered any) error {
 			dependencies.Logger.Error("agent execution panic", "panic", recovered)
@@ -64,13 +78,19 @@ func New(cfg config.Config, dependencies Dependencies) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
-	mux.Handle("/", a2asrv.NewRESTHandler(
+	restHandler := a2asrv.NewRESTHandler(
 		requestHandler,
 		a2asrv.WithTransportKeepAlive(cfg.KeepAlive),
 		a2asrv.WithTransportPanicHandler(func(recovered any) error {
 			dependencies.Logger.Error("transport panic", "panic", recovered)
 			return a2a.ErrInternalError
 		}),
-	))
-	return limitRequestBody(cfg.MaxRequestBytes, normalizeServiceParameters(mux)), nil
+	)
+	var protectedHandler http.Handler = normalizeServiceParameters(restHandler)
+	protectedHandler = limitRequestBody(cfg.MaxRequestBytes, protectedHandler)
+	if dependencies.Authentication != nil {
+		protectedHandler = dependencies.Authentication.Middleware(protectedHandler)
+	}
+	mux.Handle("/", protectedHandler)
+	return mux, nil
 }

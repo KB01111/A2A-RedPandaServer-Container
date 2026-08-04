@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KB01111/A2A-RedPandaServer-Container/internal/auth"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/config"
 	"github.com/KB01111/A2A-RedPandaServer-Container/internal/orchestrator"
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 )
 
 func TestRequiredA2ARoutes(t *testing.T) {
@@ -216,6 +219,72 @@ func TestProductionRequiresExplicitTaskStore(t *testing.T) {
 	}
 }
 
+func TestProductionRequiresAuthentication(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Environment = "production"
+	_, err := New(cfg, Dependencies{
+		Dispatcher: orchestrator.LoopbackDispatcher{},
+		TaskStore:  taskstore.NewInMemory(nil),
+	})
+	if err == nil || !strings.Contains(err.Error(), "authentication is required") {
+		t.Fatalf("New() error = %v, want authentication requirement", err)
+	}
+}
+
+func TestAuthenticatedServerKeepsAgentCardPublicAndProtectsA2A(t *testing.T) {
+	testServer := newAuthenticatedTestServer(t)
+
+	cardResponse, err := testServer.Client().Get(testServer.URL + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, cardResponse.Body)
+	if cardResponse.StatusCode != http.StatusOK {
+		t.Fatalf("agent card status = %d", cardResponse.StatusCode)
+	}
+	cardBody, err := io.ReadAll(cardResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(cardBody, []byte("openIdConnectSecurityScheme")) || !bytes.Contains(cardBody, []byte("https://issuer.example.test/.well-known/openid-configuration")) {
+		t.Fatalf("Agent Card security = %s", cardBody)
+	}
+
+	message := marshalJSON(t, a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"))})
+	unauthenticated := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/message:send", message)
+	defer closeBody(t, unauthenticated.Body)
+	if unauthenticated.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d", unauthenticated.StatusCode)
+	}
+
+	message = marshalJSON(t, a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"))})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, testServer.URL+"/message:send", message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(a2a.SvcParamVersion, string(a2a.Version))
+	req.Header.Set("Authorization", "Bearer valid")
+	response, err := testServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, response.Body)
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("authenticated status = %d, body = %s", response.StatusCode, body)
+	}
+}
+
+func TestAuthenticationRunsBeforeRequestBodyBuffering(t *testing.T) {
+	testServer := newAuthenticatedTestServerWithMaxBody(t, 8)
+	response := request(t, testServer.Client(), http.MethodPost, testServer.URL+"/message:send", strings.NewReader(strings.Repeat("x", 1024)))
+	defer closeBody(t, response.Body)
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want authentication before 413", response.StatusCode)
+	}
+}
+
 func newTestServer(t *testing.T) *httptest.Server {
 	return newTestServerWithMaxBody(t, 1<<20)
 }
@@ -231,6 +300,44 @@ func newTestServerWithMaxBody(t *testing.T, maxRequestBytes int64) *httptest.Ser
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	return server
+}
+
+type testVerifier struct{}
+
+func (testVerifier) Verify(_ context.Context, token string) (auth.Identity, error) {
+	if token != "valid" {
+		return auth.Identity{}, auth.ErrInvalidToken
+	}
+	return auth.Identity{
+		Issuer:  "https://issuer.example.test",
+		Subject: "user-1",
+		Tenant:  "tenant-1",
+		Scopes:  []string{"a2a"},
+	}, nil
+}
+
+func newAuthenticatedTestServer(t *testing.T) *httptest.Server {
+	return newAuthenticatedTestServerWithMaxBody(t, 1<<20)
+}
+
+func newAuthenticatedTestServerWithMaxBody(t *testing.T, maxRequestBytes int64) *httptest.Server {
+	t.Helper()
+	authenticator, err := auth.NewAuthenticator(testVerifier{}, "https://issuer.example.test", []string{"a2a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(t)
+	cfg.MaxRequestBytes = maxRequestBytes
+	handler, err := New(cfg, Dependencies{
+		Dispatcher:     orchestrator.LoopbackDispatcher{},
+		Authentication: authenticator,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	testServer := httptest.NewServer(handler)
+	t.Cleanup(testServer.Close)
+	return testServer
 }
 
 func newTestConfig(t *testing.T) config.Config {

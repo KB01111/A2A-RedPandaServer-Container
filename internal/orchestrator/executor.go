@@ -72,7 +72,7 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 		dispatchRequest := DispatchRequest{
 			TaskID:         execCtx.TaskID,
 			ContextID:      execCtx.ContextID,
-			Tenant:         execCtx.Tenant,
+			Tenant:         executorTenant(execCtx),
 			Message:        execCtx.Message,
 			Metadata:       execCtx.Metadata,
 			User:           execCtx.User,
@@ -115,7 +115,7 @@ func (e *Executor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) 
 	return func(yield func(a2a.Event, error) bool) {
 		request := CancelRequest{
 			TaskID:     execCtx.TaskID,
-			Tenant:     execCtx.Tenant,
+			Tenant:     executorTenant(execCtx),
 			User:       execCtx.User,
 			Extensions: serviceExtensions(execCtx.ServiceParams),
 		}
@@ -126,6 +126,18 @@ func (e *Executor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) 
 		}
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
 	}
+}
+
+func executorTenant(execCtx *a2asrv.ExecutorContext) string {
+	if execCtx.Tenant != "" {
+		return execCtx.Tenant
+	}
+	if execCtx.User != nil {
+		if tenant, ok := execCtx.User.Attributes["tenant"].(string); ok {
+			return tenant
+		}
+	}
+	return ""
 }
 
 func serviceExtensions(params *a2asrv.ServiceParams) []string {
