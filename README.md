@@ -26,3 +26,22 @@ for the SDK boundary and planned production adapters.
 
 `.env.example` documents variables loaded by the container runtime. When
 running the binary directly, export overrides in the shell environment.
+
+## OIDC and PostgreSQL development wiring
+
+Set `OIDC_ISSUER`, `OIDC_AUDIENCE`, and `DATABASE_URL` to exercise the durable,
+authenticated path. Credentials are read from mounted files such as
+`DATABASE_PASSWORD_FILE`; passwords, passfiles, service files, and password
+environment variables outside that explicit path are rejected. OIDC policy
+variables without a complete issuer/audience pair also fail startup.
+Apply schema migrations separately before starting the server:
+
+```powershell
+go run ./cmd/migrate
+go run ./cmd/server
+```
+
+The local in-memory task store remains available only when no database is
+configured in development or tests. Staging and production require explicit
+authentication and durable storage. See [docs/architecture.md](docs/architecture.md)
+for the token and tenant-isolation contract.

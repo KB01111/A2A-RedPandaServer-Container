@@ -80,10 +80,174 @@ var configEnvironmentKeys = []string{
 	"A2A_AGENT_INACTIVITY_TIMEOUT",
 	"HTTP_READ_TIMEOUT",
 	"MAX_REQUEST_BODY_BYTES",
+	"OIDC_ISSUER",
+	"OIDC_AUDIENCE",
+	"OIDC_TENANT_CLAIM",
+	"OIDC_REQUIRED_SCOPES",
+	"OIDC_ALLOWED_ALGORITHMS",
+	"OIDC_CLOCK_SKEW",
+	"OIDC_HTTP_TIMEOUT",
+	"DATABASE_URL",
+	"DATABASE_PASSWORD_FILE",
+	"DATABASE_MAX_CONNECTIONS",
+	"DATABASE_MIN_CONNECTIONS",
+	"DATABASE_MAX_CONNECTION_LIFETIME",
+	"DATABASE_MAX_CONNECTION_IDLE",
+	"DATABASE_HEALTH_CHECK_PERIOD",
+}
+
+func TestLoadOIDCConfiguration(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_ISSUER", "http://localhost:5556/")
+	t.Setenv("OIDC_AUDIENCE", "bridge-a2a")
+	t.Setenv("OIDC_ALLOWED_ALGORITHMS", "RS256, ES256")
+	t.Setenv("OIDC_REQUIRED_SCOPES", "a2a, tasks.read")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.OIDC.Enabled() || cfg.OIDC.Issuer != "http://localhost:5556/" || len(cfg.OIDC.AllowedAlgorithms) != 2 || len(cfg.OIDC.RequiredScopes) != 2 || !cfg.OIDC.AllowPrivateIPs {
+		t.Fatalf("OIDC config = %#v", cfg.OIDC)
+	}
+}
+
+func TestLoadDisallowsPrivateOIDCAddressesOutsideDevelopment(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("PUBLIC_BASE_URL", "https://a2a.example.test")
+	t.Setenv("OIDC_ISSUER", "https://issuer.example.test")
+	t.Setenv("OIDC_AUDIENCE", "bridge-a2a")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.OIDC.AllowPrivateIPs {
+		t.Fatal("production OIDC configuration allows private IP destinations")
+	}
+}
+
+func TestLoadRejectsUnsafeOIDCConfiguration(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "missing audience", key: "OIDC_AUDIENCE", value: ""},
+		{name: "symmetric algorithm", key: "OIDC_ALLOWED_ALGORITHMS", value: "HS256"},
+		{name: "excessive skew", key: "OIDC_CLOCK_SKEW", value: "10m"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setValidEnvironment(t)
+			t.Setenv("OIDC_ISSUER", "http://localhost:5556")
+			t.Setenv("OIDC_AUDIENCE", "bridge-a2a")
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() error = nil, want OIDC validation error")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsNonLoopbackHTTPOIDCIssuer(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_ISSUER", "http://issuer.example.test")
+	t.Setenv("OIDC_AUDIENCE", "bridge-a2a")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want HTTPS requirement")
+	}
+}
+
+func TestLoadRejectsLoopbackHTTPOIDCIssuerOutsideDevelopment(t *testing.T) {
+	for _, environment := range []string{"staging", "production"} {
+		t.Run(environment, func(t *testing.T) {
+			setValidEnvironment(t)
+			t.Setenv("APP_ENV", environment)
+			t.Setenv("PUBLIC_BASE_URL", "https://a2a.example.test")
+			t.Setenv("OIDC_ISSUER", "http://localhost:5556")
+			t.Setenv("OIDC_AUDIENCE", "bridge-a2a")
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() error = nil, want HTTPS requirement")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsOIDCPolicyWithoutProvider(t *testing.T) {
+	for _, key := range []string{
+		"OIDC_TENANT_CLAIM",
+		"OIDC_REQUIRED_SCOPES",
+		"OIDC_ALLOWED_ALGORITHMS",
+		"OIDC_CLOCK_SKEW",
+		"OIDC_HTTP_TIMEOUT",
+	} {
+		t.Run(key, func(t *testing.T) {
+			setValidEnvironment(t)
+			t.Setenv(key, "configured")
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() error = nil, want incomplete OIDC configuration error")
+			}
+		})
+	}
+}
+
+func TestLoadDatabaseConfiguration(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgresql://bridge_a2a@db.internal:5432/bridge_a2a?sslmode=verify-full")
+	t.Setenv("DATABASE_PASSWORD_FILE", "/run/secrets/database_password")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Database.MaxConnections != 20 || cfg.Database.MinConnections != 2 || cfg.Database.PasswordFile != "/run/secrets/database_password" {
+		t.Fatalf("database config = %#v", cfg.Database)
+	}
+}
+
+func TestLoadRejectsDatabasePasswordInURL(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgresql://bridge:secret@db.internal/bridge")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want password-in-URL validation error")
+	}
+}
+
+func TestLoadRejectsDatabaseCredentialQueryParameters(t *testing.T) {
+	for _, parameter := range []string{"password=secret", "sslpassword=secret", "passfile=/run/secrets/pgpass", "service=secret-service", "servicefile=/run/secrets/pg_service.conf"} {
+		t.Run(parameter, func(t *testing.T) {
+			setValidEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgresql://bridge@db.internal/bridge?"+parameter)
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() error = nil, want implicit credential source rejection")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidDatabasePasswordFileConfiguration(t *testing.T) {
+	t.Run("without database URL", func(t *testing.T) {
+		setValidEnvironment(t)
+		t.Setenv("DATABASE_PASSWORD_FILE", "/run/secrets/database_password")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want DATABASE_URL requirement")
+		}
+	})
+
+	t.Run("relative path", func(t *testing.T) {
+		setValidEnvironment(t)
+		t.Setenv("DATABASE_URL", "postgresql://bridge@db.internal/bridge")
+		t.Setenv("DATABASE_PASSWORD_FILE", "relative/password")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want absolute path requirement")
+		}
+	})
 }
 
 func setValidEnvironment(t *testing.T) {
 	t.Helper()
+	for _, key := range configEnvironmentKeys {
+		t.Setenv(key, "")
+	}
 	values := map[string]string{
 		"APP_ENV":                      "test",
 		"PORT":                         "8080",

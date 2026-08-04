@@ -29,6 +29,9 @@ func loadAgentCard(path, publicBaseURL string) (*a2a.AgentCard, error) {
 		if skill.ID == "" || skill.Name == "" || skill.Description == "" || len(skill.Tags) == 0 {
 			return nil, fmt.Errorf("agent card skill %d requires id, name, description, and tags", index)
 		}
+		if len(skill.SecurityRequirements) > 0 {
+			return nil, fmt.Errorf("agent card skill %d advertises security that is not configured", index)
+		}
 	}
 	if !card.Capabilities.Streaming {
 		return nil, fmt.Errorf("agent card must advertise the mounted streaming transport")
@@ -38,6 +41,9 @@ func loadAgentCard(path, publicBaseURL string) (*a2a.AgentCard, error) {
 	}
 	if len(card.SecuritySchemes) > 0 || len(card.SecurityRequirements) > 0 {
 		return nil, fmt.Errorf("agent card advertises security that is not configured")
+	}
+	if len(card.Signatures) > 0 {
+		return nil, fmt.Errorf("agent card signatures cannot be retained after runtime projection")
 	}
 	if len(card.SupportedInterfaces) == 0 {
 		card.SupportedInterfaces = []*a2a.AgentInterface{
