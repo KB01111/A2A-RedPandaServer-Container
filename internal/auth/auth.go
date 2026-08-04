@@ -90,7 +90,7 @@ func (a *Authenticator) ConfigureAgentCard(card *a2a.AgentCard) {
 	}
 	card.SecurityRequirements = a2a.SecurityRequirementsOptions{
 		a2a.SecurityRequirements{
-			schemeName: a2a.SecuritySchemeScopes{},
+			schemeName: a2a.SecuritySchemeScopes(append([]string(nil), a.requiredScopes...)),
 		},
 	}
 }

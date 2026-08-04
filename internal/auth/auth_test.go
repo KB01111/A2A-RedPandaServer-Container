@@ -242,9 +242,13 @@ func TestConfigureAgentCardPublishesOIDCDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsonText := string(data)
-	for _, expected := range []string{`"openIdConnectSecurityScheme"`, `"openIdConnectUrl":"https://issuer.example.test/.well-known/openid-configuration"`, `"schemes":{"oidc":[]}`} {
+	for _, expected := range []string{`"openIdConnectSecurityScheme"`, `"openIdConnectUrl":"https://issuer.example.test/.well-known/openid-configuration"`, `"schemes":{"oidc":["a2a"]}`} {
 		if !strings.Contains(jsonText, expected) {
 			t.Errorf("Agent Card JSON %s does not contain %s", jsonText, expected)
 		}
+	}
+	card.SecurityRequirements[0]["oidc"][0] = "mutated"
+	if authenticator.requiredScopes[0] != "a2a" {
+		t.Fatalf("Agent Card scopes alias authenticator configuration: %#v", authenticator.requiredScopes)
 	}
 }
